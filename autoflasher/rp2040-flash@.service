@@ -1,0 +1,11 @@
+[Unit]
+Description=Flash RP2040 on /dev/%i
+After=dev-%i.device
+BindsTo=dev-%i.device
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/flash-rp2040.sh /dev/%i
+TimeoutStartSec=30
+# Optional: point to a different firmware folder
+Environment=RP2040_FIRMWARE_DIR=/opt/rp2040-firmware

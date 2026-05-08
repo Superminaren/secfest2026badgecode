@@ -1,0 +1,2 @@
+# Trigger flash when an RP2040 in BOOTSEL mode appears as a block device
+SUBSYSTEM=="block", ACTION=="add", ENV{ID_VENDOR_ID}=="2e8a", ENV{ID_MODEL_ID}=="0003", ENV{DEVTYPE}=="disk", TAG+="systemd", ENV{SYSTEMD_WANTS}+="rp2040-flash@%k.service"
