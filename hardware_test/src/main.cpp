@@ -1,10 +1,12 @@
 // Secfest 2026 Badge — Hardware Test Sketch
-// Tests: buttons, front LEDs, flashlight LED, IS31FL3731 9x9 matrix, I2C bus scan
+// Tests: buttons, front LEDs, flashlight LED, IS31FL3731 LED matrix, I2C bus scan, scrolling text
 
 #include <Arduino.h>
 #include <Wire.h>
 #include <string.h>
 #include <Adafruit_IS31FL3731.h>
+
+bool hidMode = false;
 
 // --- Buttons (active LOW, internal pull-ups) ---
 // Per schematic: BTN_A=GP8, B=GP9, UP=GP10, DWN=GP11, LFT=GP12, RGT=GP13
@@ -49,38 +51,18 @@ const int FRONT_LED_OFF = HIGH;
 
 // Wire  = LED matrix bus (GPIO4/5, I2C0)
 // Wire1 = main / SAO bus  (GPIO2/3, I2C1)
-Adafruit_IS31FL3731 matrix(9, 16);
+Adafruit_IS31FL3731* matrix = nullptr;
 
-// --- Matrix orientation / placement ---
-// Logical coordinate system for the rest of the code:
-//   x = 0..8 left-to-right as you look at the badge front
-//   y = 0..8 top-to-bottom as you look at the badge front
-//
-// Empirically: only the vertical axis is flipped between schematic and
-// physical (top<->bottom). Horizontal axis already matches. So the helper
-// just mirrors Y.
-//
-// NOTE: the badge appears to be charlieplex-wired (9 pins → 72 LEDs).
-// The 9 LEDs along the main diagonal — logical (0,0), (1,1), … (8,8) —
-// are not physically driveable and will always stay dark, regardless of
-// what we write to the chip.
 static const int MATRIX_W = 9;
 static const int MATRIX_H = 16;
 
-// Observed-dead pixels: the schematic shows 18 dedicated chip pins
-// (CA1..9 + CB1..9) wired to 81 independent LEDs, so all positions should
-// be addressable in principle. Empirically, the 9 LEDs on the main
-// physical diagonal stay dark — root cause not yet identified (could be
-// PCB defect, soldering issue on those 9 specific parts, or something
-// subtle in the IS31FL3731's matrix scan). For now the helper just marks
-// them so test patterns can skip drawing there until we know more.
 static inline bool matrixPixelIsDead(int x, int y) {
   return x == y;
 }
 
 static inline void matrixSetPixel(int x, int y, uint8_t brightness) {
   if (x < 0 || x >= MATRIX_W || y < 0 || y >= MATRIX_H) return;
-  matrix.drawPixel(x, (MATRIX_H - 1) - y, brightness);
+  matrix->drawPixel(x, (MATRIX_H - 1) - y, brightness);
 }
 
 static void matrixFill(uint8_t brightness) {
@@ -117,51 +99,175 @@ void scanI2C(TwoWire& bus, const char* label) {
   if (!found) Serial.println("  (none found)");
 }
 
+// ------------------------------------------------------------------- animation state ---
+
+enum AnimState {
+  ANIM_ALL_ON,
+  ANIM_CORNERS,
+  ANIM_ROW_SWEEP,
+  ANIM_COL_SWEEP,
+  ANIM_CHEVRON,
+  ANIM_DRIVEABLE,
+  ANIM_TEXT_SCROLL,
+  ANIM_COUNT
+};
+
+AnimState animState = ANIM_ALL_ON;
+uint32_t animStartTime = 0;
+const uint32_t ANIM_DURATION = 2000;
+int scrollPos = 0;
+
+struct Point { int x; int y; };
+const Point corners[4] = {
+  {0, 0},
+  {MATRIX_W - 1, 0},
+  {0, MATRIX_H - 1},
+  {MATRIX_W - 1, MATRIX_H - 1}
+};
+
+void runAnimation() {
+  if (!matrix) return;
+  
+  uint32_t elapsed = millis() - animStartTime;
+  
+  switch (animState) {
+    case ANIM_ALL_ON:
+      matrix->clear();
+      matrixFill(50);
+      if (elapsed > ANIM_DURATION) {
+        animState = ANIM_CORNERS;
+        animStartTime = millis();
+      }
+      break;
+      
+    case ANIM_CORNERS: {
+      int corner = (elapsed / 500) % 4;
+      matrix->clear();
+      matrixSetPixel(corners[corner].x, corners[corner].y, 220);
+      if (elapsed > ANIM_DURATION) {
+        animState = ANIM_ROW_SWEEP;
+        animStartTime = millis();
+      }
+      break;
+    }
+    
+    case ANIM_ROW_SWEEP: {
+      int y = (elapsed / 100) % MATRIX_H;
+      matrix->clear();
+      for (int x = 0; x < MATRIX_W; x++) matrixSetPixel(x, y, 180);
+      if (elapsed > ANIM_DURATION) {
+        animState = ANIM_COL_SWEEP;
+        animStartTime = millis();
+      }
+      break;
+    }
+    
+    case ANIM_COL_SWEEP: {
+      int x = (elapsed / 100) % MATRIX_W;
+      matrix->clear();
+      for (int y = 0; y < MATRIX_H; y++) matrixSetPixel(x, y, 180);
+      if (elapsed > ANIM_DURATION) {
+        animState = ANIM_CHEVRON;
+        animStartTime = millis();
+      }
+      break;
+    }
+    
+    case ANIM_CHEVRON: {
+      static const uint8_t chevron[9][9] = {
+        {0,0,0,0,0,0,0,1,0},
+        {0,0,0,0,0,0,1,0,1},
+        {0,0,0,0,0,1,0,1,0},
+        {0,0,0,0,1,0,1,0,0},
+        {0,0,0,1,0,1,0,0,0},
+        {0,0,1,0,1,0,0,0,0},
+        {0,1,0,1,0,0,0,0,0},
+        {1,0,1,0,0,0,0,0,0},
+        {0,1,0,0,0,0,0,0,0},
+      };
+      matrix->clear();
+      for (int y = 0; y < 9; y++)
+        for (int x = 0; x < MATRIX_W; x++)
+          matrixSetPixel(x, y, chevron[y][x] ? 200 : 0);
+      if (elapsed > ANIM_DURATION) {
+        animState = ANIM_DRIVEABLE;
+        animStartTime = millis();
+      }
+      break;
+    }
+    
+    case ANIM_DRIVEABLE: {
+      matrix->clear();
+      for (int y = 0; y < MATRIX_H; y++)
+        for (int x = 0; x < MATRIX_W; x++)
+          if (!matrixPixelIsDead(x, y)) matrixSetPixel(x, y, 60);
+      if (elapsed > ANIM_DURATION) {
+        animState = ANIM_TEXT_SCROLL;
+        animStartTime = millis();
+        scrollPos = 16;
+      }
+      break;
+    }
+    
+    case ANIM_TEXT_SCROLL: {
+      matrix->clear();
+      matrix->setTextSize(1);
+      matrix->setTextColor(255);
+      const char* scrollText = "Welcome to Securityfest 2026   ";
+      matrix->setCursor(16 - scrollPos, 1);
+      matrix->print(scrollText);
+      scrollPos++;
+      if (scrollPos > strlen(scrollText) * 6 + 16) {
+        animState = ANIM_ALL_ON;
+      }
+      delay(60);
+      break;
+    }
+    
+    default:
+      animState = ANIM_ALL_ON;
+      break;
+  }
+}
+
 // ------------------------------------------------------------------- setup ---
 
 void setup() {
-  Serial.begin(115200);
-  delay(2000);  // wait for USB CDC to enumerate
-  Serial.println("\n=== Secfest 2026 Badge Hardware Test ===\n");
-
-  // Buttons
+  pinMode(BTN_A, INPUT_PULLUP);
+  
+  if (digitalRead(BTN_A) == LOW) {
+    hidMode = true;
+    Serial.end();
+  } else {
+    Serial.begin(115200);
+    delay(2000);
+    Serial.println("\n=== Secfest 2026 Badge Hardware Test ===\n");
+  }
+  
   for (int pin : BUTTONS) pinMode(pin, INPUT_PULLUP);
   Serial.println("[Buttons] GP8-GP13 configured with pull-ups");
 
-  // LEDs
   for (int pin : FRONT_LEDS) { pinMode(pin, OUTPUT); digitalWrite(pin, FRONT_LED_OFF); }
   pinMode(LED_FLASHLIGHT, OUTPUT);
   digitalWrite(LED_FLASHLIGHT, LOW);
   Serial.println("[LEDs]    GPIO 15, 23-26 configured");
 
-  // --- Front LED sweep (both polarities, diagnostic mode) ---
-  // We don't yet know whether the front LEDs are wired active-high
-  // (anode-to-GPIO) or active-low (anode-to-3V3). Drive each pin HIGH
-  // for ~600 ms then LOW for ~600 ms so whichever polarity is correct
-  // will produce visible light. The pin is set to INPUT (Hi-Z) between
-  // tests so a wrongly polarized previous LED can't keep current flowing.
   Serial.println("\n[Test] Front LEDs — sweeping both polarities");
   for (int i = 0; i < NUM_LEDS; i++) {
     int pin = FRONT_LEDS[i];
     Serial.print("  FRONT_LED_"); Serial.print(i + 1);
     Serial.print(" on GP"); Serial.println(pin);
-
     pinMode(pin, OUTPUT);
-    Serial.println("    -> HIGH (lights active-high wiring)");
     digitalWrite(pin, HIGH);
     delay(50);
-    Serial.println("    -> LOW  (lights active-low  wiring)");
     digitalWrite(pin, LOW);
     delay(50);
-
-    // Release the pin between LEDs so a wrong-polarity LED can't stay lit
     pinMode(pin, INPUT);
     delay(200);
     pinMode(pin, OUTPUT);
     digitalWrite(pin, FRONT_LED_OFF);
   }
 
-  // --- Flashlight LED ---
   Serial.println("[Test] Flashlight LED — 3 pulses");
   for (int i = 0; i < 3; i++) {
     digitalWrite(LED_FLASHLIGHT, HIGH);
@@ -170,169 +276,53 @@ void setup() {
     delay(150);
   }
 
-  // --- IS31FL3731 matrix (on Wire / I2C0, GP4 = SDA_LED, GP5 = SCL_LED) ---
   Wire.setSDA(LED_MATRIX_SDA);
   Wire.setSCL(LED_MATRIX_SCL);
   Wire.begin();
 
   Serial.println("\n[Test] IS31FL3731 LED matrix (9x9) on GP4/GP5");
-  if (!matrix.begin(IS31_ADDR, &Wire)) {
-    Serial.println("  ERROR: IS31FL3731 not found at 0x74 — check wiring on GP4/GP5");
+  matrix = new Adafruit_IS31FL3731(9, 16);
+  if (!matrix->begin(IS31_ADDR, &Wire)) {
+    Serial.println("  ERROR: IS31FL3731 not found at 0x74");
+    matrix = nullptr;
   } else {
-    Serial.println("  Found! Running orientation test...");
-
-    // 1. All-on, confirms every LED in the 9x9 lights at all.
-    Serial.println("    [1/5] All 81 LEDs on (dim)");
-    matrix.clear();
-    matrixFill(50);
-    delay(800);
-    matrix.clear();
-
-    // 2. Corners one at a time — visually confirms the orientation map.
-    //    If the helper is correct, each label below should light the LED
-    //    you'd expect to see in that corner of the badge front.
-    struct Corner { int x, y; const char* name; };
-    const Corner corners[] = {
-      { 0,             0,             "top-left     (x=0, y=0)" },
-      { MATRIX_W - 1,  0,             "top-right    (x=8, y=0)" },
-      { 0,             MATRIX_H - 1,  "bottom-left  (x=0, y=8)" },
-      { MATRIX_W - 1,  MATRIX_H - 1,  "bottom-right (x=8, y=8)" },
-    };
-    Serial.println("    [2/5] Corner check");
-    for (const Corner& c : corners) {
-      Serial.print("        ");
-      Serial.println(c.name);
-      matrix.clear();
-      matrixSetPixel(c.x, c.y, 220);
-      delay(900);
-    }
-    matrix.clear();
-
-    // 3. Row sweep, top -> bottom. Should look like a horizontal bar
-    //    moving downward.
-    Serial.println("    [3/5] Row sweep, top -> bottom");
-    for (int y = 0; y < MATRIX_H; y++) {
-      matrix.clear();
-      for (int x = 0; x < MATRIX_W; x++) matrixSetPixel(x, y, 180);
-      delay(200);
-    }
-    matrix.clear();
-
-    // 4. Column sweep, left -> right. Vertical bar moving rightward.
-    Serial.println("    [4/5] Column sweep, left -> right");
-    for (int x = 0; x < MATRIX_W; x++) {
-      matrix.clear();
-      for (int y = 0; y < MATRIX_H; y++) matrixSetPixel(x, y, 180);
-      delay(200);
-    }
-    matrix.clear();
-
-    // 5. Anti-diagonal chevron — every lit pixel is OFF the dead diagonal,
-    //    so this pattern displays without any holes. It also points
-    //    visually from top-right toward bottom-left, which is a strong
-    //    asymmetric cue for orientation (mirror or rotation would be
-    //    obvious immediately).
-    Serial.println("    [5/5] Chevron along anti-diagonal (no diagonal slash)");
-    const uint8_t chevron[MATRIX_H][MATRIX_W] = {
-      {0,0,0,0,0,0,0,1,0},
-      {0,0,0,0,0,0,1,0,1},
-      {0,0,0,0,0,1,0,1,0},
-      {0,0,0,0,1,0,1,0,0},
-      {0,0,0,1,0,1,0,0,0},
-      {0,0,1,0,1,0,0,0,0},
-      {0,1,0,1,0,0,0,0,0},
-      {1,0,1,0,0,0,0,0,0},
-      {0,1,0,0,0,0,0,0,0},
-    };
-    for (int y = 0; y < 9; y++)
-      for (int x = 0; x < MATRIX_W; x++)
-        matrixSetPixel(x, y, chevron[y][x] ? 200 : 0);
-    delay(1500);
-    matrix.clear();
-
-    // 6. Final pass: solid fill, but only on driveable pixels. Demonstrates
-    //    matrixPixelIsDead being used to skip the diagonal cleanly.
-    Serial.println("    [bonus] All driveable LEDs on (72/81)");
-    for (int y = 0; y < MATRIX_H; y++)
-      for (int x = 0; x < MATRIX_W; x++)
-        if (!matrixPixelIsDead(x, y)) matrixSetPixel(x, y, 60);
-    delay(1500);
-    matrix.clear();
-
-    // 7. Chip register sweep — lights PWM registers 0..143 one at a time
-    //    so you can physically map chip register -> badge LED position.
-    //    Watch the badge AND the serial monitor; for each "reg = N" line
-    //    note which physical LED lit (or "none" if it stayed dark).
-    //    The 9 registers that never light tell us exactly what's wrong
-    //    with the diagonal LEDs. ~400 ms per register, total ~60 s.
-    Serial.println("    [diag] Chip register sweep — write your observations");
-    for (uint8_t reg = 0; reg < 144; reg++) {
-      // Only sweep the 81 registers our 9x9 layout actually uses; the
-      // other 63 (x=9..15 for each row) drive CB10..CB16, which aren't
-      // wired on this badge.
-      uint8_t cb = reg % 16;          // x in chip space (CB index)
-      uint8_t ca = reg / 16;          // y in chip space (CA index)
-      if (cb > 8 || ca > 8) continue;
-
-      matrix.clear();
-      matrix.setLEDPWM(reg, 220);
-      Serial.print("      reg ");
-      if (reg < 100) Serial.print(' ');
-      if (reg < 10)  Serial.print(' ');
-      Serial.print(reg);
-      Serial.print("  (CA"); Serial.print(ca + 1);
-      Serial.print(", CB"); Serial.print(cb + 1);
-      Serial.println(")");
-      delay(400);
-    }
-    matrix.clear();
-    Serial.println("    [diag] Sweep done.");
-
-    Serial.println("    [test] Individual LED test - all pixels");
-    for (int y = 0; y < MATRIX_H; y++) {
-      for (int x = 0; x < MATRIX_W; x++) {
-        if (matrixPixelIsDead(x, y)) continue;
-        matrix.clear();
-        matrixSetPixel(x, y, 255);
-        delay(30);
-      }
-    }
-    matrix.clear();
-
-    Serial.println("  Matrix test done.");
-
-    Serial.println("\n[Test] Scrolling text: 'Welcome to Securityfest 2026'");
-    matrix.setTextSize(1);
-    matrix.setTextColor(255);
-    
-    const char* scrollText = "Welcome to Securityfest 2026   ";
-    int textLen = strlen(scrollText);
-    int charWidth = 6;
-    int totalWidth = textLen * charWidth;
-    
-    for (int scroll = 0; scroll < totalWidth + 16; scroll++) {
-      matrix.clear();
-      matrix.setCursor(16 - scroll, 1);
-      matrix.print(scrollText);
-      delay(80);
-    }
-    matrix.clear();
-    
-    Serial.println("  Text scroll done.");
+    Serial.println("  Found! Starting animation loop...");
+    animStartTime = millis();
   }
 
-  // --- Main / SAO I2C bus (on Wire1 / I2C1, GP2 = SDA, GP3 = SCL) ---
   Wire1.setSDA(MAIN_SDA);
   Wire1.setSCL(MAIN_SCL);
   Wire1.begin();
 
-  // --- I2C bus scan ---
   scanI2C(Wire,  "matrix bus (SDA=GP4, SCL=GP5)");
   scanI2C(Wire1, "main bus   (SDA=GP2, SCL=GP3)");
 
-  // Signal setup complete
-  Serial.println("\n[Ready] Entering button-test loop. Press any button.\n");
+  Serial.println("\n[Ready] Animation loop running. Hold Button A to reset.\n");
   blinkFrontLeds(3, 100);
+}
+
+// -------------------------------------------------------------------- TinyUSB HID ---
+
+extern "C" {
+bool tud_hid_n_report_complete_cb(uint8_t itf, uint8_t const* report, uint16_t len) {
+  (void)itf; (void)report; (void)len;
+  return true;
+}
+
+void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, uint8_t report_type, uint8_t const* buffer, uint16_t bufsize) {
+  (void)itf; (void)report_id; (void)report_type; (void)buffer; (void)bufsize;
+}
+
+uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, uint8_t report_type, uint8_t* buffer, uint16_t bufsize) {
+  (void)itf; (void)report_id; (void)report_type; 
+  if (bufsize < 1) return 0;
+  uint8_t btn = 0;
+  for (int i = 0; i < NUM_BUTTONS; i++) {
+    if (digitalRead(BUTTONS[i]) == LOW) btn |= (1 << i);
+  }
+  buffer[0] = btn;
+  return 1;
+}
 }
 
 // -------------------------------------------------------------------- loop ---
@@ -340,13 +330,21 @@ void setup() {
 bool prevState[NUM_BUTTONS] = {};
 
 void loop() {
+  if (digitalRead(BTN_A) == LOW && !prevState[0]) {
+    Serial.println("\n[Reset] Rebooting...");
+    delay(100);
+    rp2040.reboot();
+  }
+  
+  if (matrix) {
+    runAnimation();
+  }
+  
   for (int i = 0; i < NUM_BUTTONS; i++) {
     bool pressed = (digitalRead(BUTTONS[i]) == LOW);
     if (pressed && !prevState[i]) {
       Serial.print("[Button] ");
       Serial.println(BTN_NAMES[i]);
-      // brief flash on button press — fires both polarities back-to-back
-      // so it's visible regardless of how the front LEDs are wired
       for (int p : FRONT_LEDS) digitalWrite(p, HIGH);
       delay(60);
       for (int p : FRONT_LEDS) digitalWrite(p, LOW);
