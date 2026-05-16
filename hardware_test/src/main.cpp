@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <string.h>
 #include <Adafruit_IS31FL3731.h>
 
 // --- Buttons (active LOW, internal pull-ups) ---
@@ -148,10 +149,10 @@ void setup() {
     pinMode(pin, OUTPUT);
     Serial.println("    -> HIGH (lights active-high wiring)");
     digitalWrite(pin, HIGH);
-    delay(600);
+    delay(50);
     Serial.println("    -> LOW  (lights active-low  wiring)");
     digitalWrite(pin, LOW);
-    delay(600);
+    delay(50);
 
     // Release the pin between LEDs so a wrong-polarity LED can't stay lit
     pinMode(pin, INPUT);
@@ -243,10 +244,9 @@ void setup() {
       {1,0,1,0,0,0,0,0,0},
       {0,1,0,0,0,0,0,0,0},
     };
-    for (int y = 0; y < MATRIX_H; y++)
+    for (int y = 0; y < 9; y++)
       for (int x = 0; x < MATRIX_W; x++)
-        //matrixSetPixel(x, y, chevron[y][x] ? 200 : 0);
-	matrixSetPixel(x,y,200);
+        matrixSetPixel(x, y, chevron[y][x] ? 200 : 0);
     delay(1500);
     matrix.clear();
 
@@ -288,7 +288,37 @@ void setup() {
     matrix.clear();
     Serial.println("    [diag] Sweep done.");
 
+    Serial.println("    [test] Individual LED test - all pixels");
+    for (int y = 0; y < MATRIX_H; y++) {
+      for (int x = 0; x < MATRIX_W; x++) {
+        if (matrixPixelIsDead(x, y)) continue;
+        matrix.clear();
+        matrixSetPixel(x, y, 255);
+        delay(30);
+      }
+    }
+    matrix.clear();
+
     Serial.println("  Matrix test done.");
+
+    Serial.println("\n[Test] Scrolling text: 'Welcome to Securityfest 2026'");
+    matrix.setTextSize(1);
+    matrix.setTextColor(255);
+    
+    const char* scrollText = "Welcome to Securityfest 2026   ";
+    int textLen = strlen(scrollText);
+    int charWidth = 6;
+    int totalWidth = textLen * charWidth;
+    
+    for (int scroll = 0; scroll < totalWidth + 16; scroll++) {
+      matrix.clear();
+      matrix.setCursor(16 - scroll, 1);
+      matrix.print(scrollText);
+      delay(80);
+    }
+    matrix.clear();
+    
+    Serial.println("  Text scroll done.");
   }
 
   // --- Main / SAO I2C bus (on Wire1 / I2C1, GP2 = SDA, GP3 = SCL) ---
