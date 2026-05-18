@@ -8,6 +8,9 @@
 
 bool hidMode = false;
 
+static const int8_t cos_lookup[] = { 0, 1, 1, 0, -1, -1, 0, 1 };
+static const int8_t sin_lookup[] = { 1, 0, -1, -1, 0, 1, 1, 0 };
+
 // --- Buttons (active LOW, internal pull-ups) ---
 // Per schematic: BTN_A=GP8, B=GP9, UP=GP10, DWN=GP11, LFT=GP12, RGT=GP13
 #define BTN_A     8
@@ -102,109 +105,134 @@ void scanI2C(TwoWire& bus, const char* label) {
 // ------------------------------------------------------------------- animation state ---
 
 enum AnimState {
-  ANIM_ALL_ON,
-  ANIM_CORNERS,
-  ANIM_ROW_SWEEP,
-  ANIM_COL_SWEEP,
-  ANIM_CHEVRON,
-  ANIM_DRIVEABLE,
+  ANIM_RAIN,
+  ANIM_SPARKLE,
+  ANIM_BOUNCE,
+  ANIM_PLASMA,
+  ANIM_MATRIX,
+  ANIM_PULSE,
   ANIM_TEXT_SCROLL,
   ANIM_COUNT
 };
 
-AnimState animState = ANIM_ALL_ON;
+AnimState animState = ANIM_RAIN;
 uint32_t animStartTime = 0;
-const uint32_t ANIM_DURATION = 2000;
 int scrollPos = 0;
+uint32_t lastFrameTime = 0;
+const uint32_t FRAME_TIME = 100;
+const uint32_t ANIM_DURATION = 4000;
 
-struct Point { int x; int y; };
-const Point corners[4] = {
-  {0, 0},
-  {MATRIX_W - 1, 0},
-  {0, MATRIX_H - 1},
-  {MATRIX_W - 1, MATRIX_H - 1}
-};
+struct Drop { int x; int y; int8_t vy; };
+Drop drops[9];
+uint8_t sparkles[MATRIX_W][MATRIX_H];
+uint8_t plasma[MATRIX_W][MATRIX_H];
+int bounceX = 4, bounceY = 8;
+int8_t bounceVX = 1, bounceVY = -1;
+
+void initAnimations() {
+  for (int i = 0; i < 9; i++) {
+    drops[i].x = i;
+    drops[i].y = random(0, 16);
+    drops[i].vy = random(1, 3);
+  }
+  for (int x = 0; x < MATRIX_W; x++)
+    for (int y = 0; y < MATRIX_H; y++)
+      sparkles[x][y] = 0;
+  bounceX = 4; bounceY = 8;
+  bounceVX = 1; bounceVY = -1;
+}
 
 void runAnimation() {
   if (!matrix) return;
   
-  uint32_t elapsed = millis() - animStartTime;
+  uint32_t now = millis();
+  if (now - lastFrameTime < FRAME_TIME) return;
+  lastFrameTime = now;
   
   switch (animState) {
-    case ANIM_ALL_ON:
+    case ANIM_RAIN:
       matrix->clear();
-      matrixFill(50);
-      if (elapsed > ANIM_DURATION) {
-        animState = ANIM_CORNERS;
-        animStartTime = millis();
+      for (int i = 0; i < 9; i++) {
+        matrixSetPixel(drops[i].x, drops[i].y, 255);
+        drops[i].y += drops[i].vy;
+        if (drops[i].y >= MATRIX_H) {
+          drops[i].y = 0;
+          drops[i].x = random(0, MATRIX_W);
+        }
       }
       break;
       
-    case ANIM_CORNERS: {
-      int corner = (elapsed / 500) % 4;
+    case ANIM_SPARKLE: {
       matrix->clear();
-      matrixSetPixel(corners[corner].x, corners[corner].y, 220);
-      if (elapsed > ANIM_DURATION) {
-        animState = ANIM_ROW_SWEEP;
-        animStartTime = millis();
+      for (int x = 0; x < MATRIX_W; x++) {
+        for (int y = 0; y < MATRIX_H; y++) {
+          if (sparkles[x][y] > 0) {
+            matrixSetPixel(x, y, sparkles[x][y]);
+            if (sparkles[x][y] > 20) sparkles[x][y] -= 20;
+            else sparkles[x][y] = 0;
+          }
+        }
+      }
+      int sx = random(0, MATRIX_W);
+      int sy = random(0, MATRIX_H);
+      if (!matrixPixelIsDead(sx, sy)) sparkles[sx][sy] = 255;
+      break;
+    }
+    
+    case ANIM_BOUNCE:
+      matrix->clear();
+      if (!matrixPixelIsDead(bounceX, bounceY)) matrixSetPixel(bounceX, bounceY, 255);
+      bounceX += bounceVX;
+      bounceY += bounceVY;
+      if (bounceX <= 0 || bounceX >= MATRIX_W - 1) bounceVX *= -1;
+      if (bounceY <= 0 || bounceY >= MATRIX_H - 1) bounceVY *= -1;
+      break;
+      
+    case ANIM_PLASMA: {
+      static uint32_t t = 0;
+      t += 2;
+      for (int x = 0; x < MATRIX_W; x++) {
+        for (int y = 0; y < MATRIX_H; y++) {
+          uint8_t v = 128 + 127 * sin((x * 0.3) + (y * 0.2) + (t * 0.05));
+          plasma[x][y] = v;
+        }
+      }
+      matrix->clear();
+      for (int x = 0; x < MATRIX_W; x++)
+        for (int y = 0; y < MATRIX_H; y++)
+          if (!matrixPixelIsDead(x, y)) matrixSetPixel(x, y, plasma[x][y]);
+      break;
+    }
+    
+    case ANIM_MATRIX: {
+      static uint32_t t = 0;
+      t++;
+      matrix->clear();
+      for (int x = 0; x < MATRIX_W; x++) {
+        int y = (t + x * 3) % MATRIX_H;
+        int brightness = 255;
+        for (int dy = 0; dy < 5 && y - dy >= 0; dy++) {
+          int b = brightness - (dy * 50);
+          if (b > 0) matrixSetPixel(x, y - dy, b);
+        }
       }
       break;
     }
     
-    case ANIM_ROW_SWEEP: {
-      int y = (elapsed / 100) % MATRIX_H;
+    case ANIM_PULSE: {
+      static uint32_t t = 0;
+      t++;
       matrix->clear();
-      for (int x = 0; x < MATRIX_W; x++) matrixSetPixel(x, y, 180);
-      if (elapsed > ANIM_DURATION) {
-        animState = ANIM_COL_SWEEP;
-        animStartTime = millis();
-      }
-      break;
-    }
-    
-    case ANIM_COL_SWEEP: {
-      int x = (elapsed / 100) % MATRIX_W;
-      matrix->clear();
-      for (int y = 0; y < MATRIX_H; y++) matrixSetPixel(x, y, 180);
-      if (elapsed > ANIM_DURATION) {
-        animState = ANIM_CHEVRON;
-        animStartTime = millis();
-      }
-      break;
-    }
-    
-    case ANIM_CHEVRON: {
-      static const uint8_t chevron[9][9] = {
-        {0,0,0,0,0,0,0,1,0},
-        {0,0,0,0,0,0,1,0,1},
-        {0,0,0,0,0,1,0,1,0},
-        {0,0,0,0,1,0,1,0,0},
-        {0,0,0,1,0,1,0,0,0},
-        {0,0,1,0,1,0,0,0,0},
-        {0,1,0,1,0,0,0,0,0},
-        {1,0,1,0,0,0,0,0,0},
-        {0,1,0,0,0,0,0,0,0},
-      };
-      matrix->clear();
-      for (int y = 0; y < 9; y++)
-        for (int x = 0; x < MATRIX_W; x++)
-          matrixSetPixel(x, y, chevron[y][x] ? 200 : 0);
-      if (elapsed > ANIM_DURATION) {
-        animState = ANIM_DRIVEABLE;
-        animStartTime = millis();
-      }
-      break;
-    }
-    
-    case ANIM_DRIVEABLE: {
-      matrix->clear();
-      for (int y = 0; y < MATRIX_H; y++)
-        for (int x = 0; x < MATRIX_W; x++)
-          if (!matrixPixelIsDead(x, y)) matrixSetPixel(x, y, 60);
-      if (elapsed > ANIM_DURATION) {
-        animState = ANIM_TEXT_SCROLL;
-        animStartTime = millis();
-        scrollPos = 16;
+      int center = 4;
+      for (int r = 0; r < 8; r++) {
+        int ring = (t + r) % 8;
+        uint8_t b = (ring < 4) ? 255 : 100;
+        for (int a = 0; a < 8; a++) {
+          int x = center + ring * cos_lookup[a];
+          int y = center + ring * sin_lookup[a];
+          if (x >= 0 && x < MATRIX_W && y >= 0 && y < MATRIX_H && !matrixPixelIsDead(x, y))
+            matrixSetPixel(x, y, b);
+        }
       }
       break;
     }
@@ -218,15 +246,28 @@ void runAnimation() {
       matrix->print(scrollText);
       scrollPos++;
       if (scrollPos > strlen(scrollText) * 6 + 16) {
-        animState = ANIM_ALL_ON;
+        animState = ANIM_RAIN;
+        initAnimations();
       }
       delay(60);
-      break;
+      return;
     }
     
     default:
-      animState = ANIM_ALL_ON;
+      animState = ANIM_RAIN;
+      initAnimations();
+      animStartTime = millis();
       break;
+  }
+  
+  if (millis() - animStartTime > ANIM_DURATION) {
+    animState = (AnimState)((animState + 1) % ANIM_TEXT_SCROLL);
+    animStartTime = millis();
+    if (animState == ANIM_TEXT_SCROLL) {
+      scrollPos = 0;
+    } else {
+      initAnimations();
+    }
   }
 }
 
@@ -287,6 +328,8 @@ void setup() {
     matrix = nullptr;
   } else {
     Serial.println("  Found! Starting animation loop...");
+    initAnimations();
+    lastFrameTime = millis();
     animStartTime = millis();
   }
 
