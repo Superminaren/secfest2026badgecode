@@ -65,11 +65,13 @@ static inline void fbClear() {
 
 static inline void fbSet(int x, int y, uint8_t b) {
   if (x < 0 || x >= W || y < 0 || y >= H) return;
+  //if (x == y) return;   // charlieplex diagonal — no LED exists here
   fb[y][x] = b;
 }
 
 static inline void fbOr(int x, int y, uint8_t b) {
   if (x < 0 || x >= W || y < 0 || y >= H) return;
+  //if (x == y) return;   // charlieplex diagonal — no LED exists here
   if (b > fb[y][x]) fb[y][x] = b;
 }
 
@@ -437,25 +439,42 @@ static int simonBtnToFront(int bi) {
 }
 
 // Draw a small arrow on the matrix for a given direction button.
+// Arrows designed so the arrowhead contains no diagonal pixels (x == y).
+// The shaft passes through (4,4) which is a non-existent diagonal LED;
+// that pixel is simply omitted — the fbSet guard silently drops it anyway.
+// The resulting one-pixel gap in the shaft is a hardware reality.
 static void simonDrawArrow(int bi, uint8_t b) {
   fbClear();
   if (bi == BI_UP) {
-    fbSet(4, 1, b); fbSet(3, 2, b); fbSet(4, 2, b); fbSet(5, 2, b);
-    fbSet(2, 3, b); fbSet(4, 3, b); fbSet(6, 3, b);
-    fbSet(4, 4, b); fbSet(4, 5, b); fbSet(4, 6, b); fbSet(4, 7, b);
+    // tip
+    fbSet(2, 3, b);
+    // arrowhead — all pixels clear of diagonal
+    fbSet(3, 4, b);
+    fbSet(1, 4, b);
+    // shaft — (4,4) is diagonal, not drawn; gap is intentional
+    fbSet(2, 4, b); fbSet(2, 5, b); fbSet(2, 6, b); fbSet(2, 7, b);
   } else if (bi == BI_DOWN) {
-    fbSet(4, 1, b); fbSet(4, 2, b); fbSet(4, 3, b); fbSet(4, 4, b);
-    fbSet(2, 5, b); fbSet(4, 5, b); fbSet(6, 5, b);
-    fbSet(3, 6, b); fbSet(4, 6, b); fbSet(5, 6, b);
-    fbSet(4, 7, b);
+    // shaft — (4,4) is diagonal, not drawn; gap is intentional
+    fbSet(2, 3, b); fbSet(2, 4, b); fbSet(2, 5, b); fbSet(2, 6, b);
+    // head
+    fbSet(3, 6, b); fbSet(1, 6, b);
+    // tip
+    fbSet(2, 7, b);
   } else if (bi == BI_LEFT) {
-    fbSet(1, 4, b); fbSet(2, 3, b); fbSet(2, 4, b); fbSet(2, 5, b);
-    fbSet(3, 2, b); fbSet(3, 4, b); fbSet(3, 6, b);
-    fbSet(4, 4, b); fbSet(5, 4, b); fbSet(6, 4, b); fbSet(7, 4, b);
+    // tip
+    fbSet(0, 5, b);
+    // head
+    fbSet(1, 6, b); fbSet(1, 4, b);
+    // shaft
+    fbSet(1, 5, b); fbSet(2, 5, b); fbSet(3, 5, b); fbSet(4, 5, b);
+
   } else if (bi == BI_RIGHT) {
-    fbSet(7, 4, b); fbSet(6, 3, b); fbSet(6, 4, b); fbSet(6, 5, b);
-    fbSet(5, 2, b); fbSet(5, 4, b); fbSet(5, 6, b);
-    fbSet(4, 4, b); fbSet(3, 4, b); fbSet(2, 4, b); fbSet(1, 4, b);
+    // tip
+    fbSet(4,5,b);
+    // head
+    fbSet(3,4,b); fbSet(3,6,b);
+    //Shaft
+    fbSet(0,5,b); fbSet(1, 5, b); fbSet(2, 5, b); fbSet(3, 5, b);
   }
 }
 
