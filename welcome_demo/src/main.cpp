@@ -13,9 +13,11 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_IS31FL3731.h>
-#include "font3x5.h"
+#include "font4x7.h"
 
 // ============================================================ pin map =======
+
+#define MATRIX_BRIGHTNESS 20
 
 #define BTN_A     8
 #define BTN_B     9
@@ -24,11 +26,14 @@
 #define BTN_LEFT  12
 #define BTN_RIGHT 13
 
+#define SAO_GP1	  0
+#define SAO_GP2   1
+
 #define LED_FLASHLIGHT 15
-#define LED_FRONT_1    23
-#define LED_FRONT_2    24
-#define LED_FRONT_3    25
-#define LED_FRONT_4    26
+#define LED_FRONT_1    20
+#define LED_FRONT_2    21
+#define LED_FRONT_3    22
+#define LED_FRONT_4    23
 
 #define LED_MATRIX_SDA 4
 #define LED_MATRIX_SCL 5
@@ -167,7 +172,7 @@ struct Scroller {
 
 static Scroller scroller;
 
-static void scrollStart(const char* t, unsigned long stepMs = 90, uint8_t b = 180) {
+static void scrollStart(const char* t, unsigned long stepMs = 70, uint8_t b = 50) {
   scroller.text = t;
   scroller.textPxWidth = (int)strlen(t) * (FONT_W + 1);
   scroller.pos = -W;      // start with text just off-screen right
@@ -593,11 +598,8 @@ const int   MENU_LEN     = sizeof(MENU_ITEMS) / sizeof(MENU_ITEMS[0]);
 static int  menuIdx      = 0;
 
 static void menuEnter() {
-  scrollStart(MENU_ITEMS[menuIdx], 90, 200);
-  frontAll(FRONT_LED_OFF);
-  // Light the front LED matching the selection so the choice is also
-  // visible without the matrix.
-  if (menuIdx < NUM_FRONT_LEDS) frontSet(menuIdx, FRONT_LED_ON);
+  scrollStart(MENU_ITEMS[menuIdx], 50, MATRIX_BRIGHTNESS);
+  // Front LEDs are driven by frontKnightRiderUpdate() — no static override here.
 }
 
 static void menuStep() {
@@ -614,7 +616,7 @@ static void menuStep() {
   // Re-render scroller continuously (loops via the "done" reset below)
   scrollRenderTick();
   if (scroller.done) {
-    scrollStart(MENU_ITEMS[menuIdx], 90, 200);
+    scrollStart(MENU_ITEMS[menuIdx], 90, MATRIX_BRIGHTNESS);
   }
   fbPush();
 }
@@ -639,12 +641,67 @@ static void enterState(AppState s) {
   fbClear(); fbPush();
   frontAll(FRONT_LED_OFF);
   switch (s) {
-    case ST_WELCOME_SCROLL: scrollStart("WELCOME TO SECURITY FEST 2026", 80, 200); break;
+    case ST_WELCOME_SCROLL: scrollStart("WELCOME TO SECURITY FEST 2026", 50, MATRIX_BRIGHTNESS); break;
     case ST_FIREWORKS:      fwInit(); break;
     case ST_MENU:           menuEnter(); break;
     case ST_SNAKE:          snakeReset(); break;
     case ST_SIMON:          simonReset(); break;
     default: break;
+  }
+}
+
+// ============================================================ SAO PWM ========
+//
+// GP1 (GPIO0): hardware PWM, duty cycle follows sin(time) — full 0-100 % swing,
+//              period ≈ 3 seconds.
+// GP2 (GPIO1): hardware PWM at a constant 10 % duty cycle.
+//
+// Both channels run at 1 kHz. analogWriteRange(1000) maps 0..1000 = 0..100 %.
+
+static void saoSetup() {
+  analogWriteFreq(1000);    // 1 kHz PWM carrier
+  analogWriteRange(1000);   // 0..1000 = 0..100 %
+  analogWrite(SAO_GP2, 30); // constant 10 %
+  analogWrite(SAO_GP1, 0);   // will be updated every loop
+}
+
+static void saoUpdate() {
+  // sin() oscillates -1..+1 with a ~3-second period.
+  // Mapped to 0..1000 for the PWM duty register.
+  float t    = (float)millis() / 1000.0f * 2.0f * 3.14159265f;
+  float s    = sinf(t);                         // -1 .. +1
+  int   duty = (int)((s + 1.0f) * 500.0f);     // 0 .. 1000
+  duty = (duty>500)*1000;
+  analogWrite(SAO_GP1, duty);
+}
+
+// ============================================================ front LED Knight Rider =======
+//
+// Passive background animation: a bright spot sweeps back and forth across
+// the four front LEDs using hardware PWM.
+//
+// Front LEDs are active-low (anode → 3V3, cathode → GPIO):
+//   analogWrite duty 0    = pin always LOW  = LED fully ON
+//   analogWrite duty 1000 = pin always HIGH = LED fully OFF
+//
+// The sweep is skipped while ST_SNAKE or ST_SIMON own the front LEDs.
+
+static void frontKnightRiderUpdate() {
+  if (appState == ST_SNAKE || appState == ST_SIMON) return;
+
+  // Triangle wave, period 800 ms → position sweeps 0.0 → 3.0 → 0.0
+  const float period = 800.0f;
+  float t   = fmodf((float)millis(), period) / period; // 0 .. 1
+  float tri = (t < 0.5f) ? (t * 2.0f) : (2.0f - t * 2.0f); // 0 .. 1 .. 0
+  float pos = tri * 3.0f;                              // 0.0 .. 3.0
+
+  for (int i = 0; i < NUM_FRONT_LEDS; i++) {
+    float dist       = fabsf(pos - (float)i);
+    // Soft glow: full brightness within 0.5 px, fades out to 1.5 px
+    float brightness = (dist < 1.5f) ? (1.0f - dist / 1.5f) : 0.0f;
+    // Invert for active-low: duty 0 = fully on, 1000 = fully off
+    int duty = 1000 - (int)(brightness * 1000.0f);
+    analogWrite(FRONT_LEDS[i], duty);
   }
 }
 
@@ -679,12 +736,17 @@ void setup() {
   // Seed RNG from a floating ADC pin if available; otherwise use micros().
   randomSeed(micros() ^ analogRead(A0));
 
+  // SAO GPIO PWM (must come after randomSeed / analogRead so ADC init is done)
+  saoSetup();
+
   enterState(ST_BOOT_SWEEP);
 }
 
 // ============================================================ loop =========
 
 void loop() {
+  saoUpdate();                 // SAO GP1 sin-wave PWM, GP2 constant 10 %
+  frontKnightRiderUpdate();    // front LED Knight Rider sweep
   inputUpdate();
 
   // Any button press during the intro animations jumps to the menu.
@@ -696,17 +758,14 @@ void loop() {
 
   switch (appState) {
     case ST_BOOT_SWEEP: {
-      // Sweep the four front LEDs once, ~250 ms each.
+      // Front LEDs handled by frontKnightRiderUpdate().
+      // Small matrix accent that grows across the screen over 1 second.
       unsigned long t = millis() - stateEnter;
-      int slot = t / 250;
+      int slot = (int)(t / 250);
       if (slot >= NUM_FRONT_LEDS) {
-        frontAll(FRONT_LED_OFF);
         enterState(ST_WELCOME_SCROLL);
         break;
       }
-      frontAll(FRONT_LED_OFF);
-      frontSet(slot, FRONT_LED_ON);
-      // Optional: small matrix accent that grows with the sweep
       fbClear();
       for (int i = 0; i <= slot && i < W; i++) fbSet(i, H / 2, 120);
       fbPush();
