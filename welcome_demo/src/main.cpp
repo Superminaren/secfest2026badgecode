@@ -13,11 +13,31 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_IS31FL3731.h>
+#include <EEPROM.h>
 #include "font4x7.h"
 
 // ============================================================ pin map =======
 
 #define MATRIX_BRIGHTNESS 20
+
+// ============================================================ brightness =====
+// Global brightness scale: 1 (dim) … 8 (full).
+// Stored in EEPROM byte 0; loaded at boot, saved whenever changed.
+#define EEPROM_SIZE        4
+#define EEPROM_ADDR_BRIGHT 0
+static uint8_t g_brightness = 8;   // 1..8
+
+static void loadBrightness() {
+  EEPROM.begin(EEPROM_SIZE);
+  uint8_t v = EEPROM.read(EEPROM_ADDR_BRIGHT);
+  g_brightness = (v >= 1 && v <= 8) ? v : 8;
+}
+
+static void saveBrightness(uint8_t v) {
+  g_brightness = v;
+  EEPROM.write(EEPROM_ADDR_BRIGHT, v);
+  EEPROM.commit();
+}
 
 #define BTN_A     8
 #define BTN_B     9
@@ -118,7 +138,9 @@ static void fbPush() {
     for (int x = 0; x < W; x++) {
       int cx, cy;
       logicalToChip(x, y, cx, cy);
-      matrix.setLEDPWM(cx + cy * 16, fb[y][x]);
+      // Scale each pixel by the global brightness (1..8 → 1/8 … 8/8 of full)
+      uint8_t val = (uint8_t)((int)fb[y][x] * g_brightness / 8);
+      matrix.setLEDPWM(cx + cy * 16, val);
     }
   }
 }
@@ -610,9 +632,62 @@ static void simonStep() {
   }
 }
 
+// ============================================================ settings =======
+//
+// Brightness selector: UP/DOWN steps through 8 levels.
+// The matrix shows a horizontal bar (rows 3-5) that fills left-to-right.
+// Changes are applied and persisted immediately so the user sees the effect.
+// A or B returns to the menu.
+
+struct SettingsState {
+  uint8_t brightness;    // working copy of g_brightness while in this screen
+  bool    exitRequested;
+};
+static SettingsState settingsCtx;
+
+static void settingsReset() {
+  settingsCtx.brightness    = g_brightness;
+  settingsCtx.exitRequested = false;
+}
+
+static void settingsStep() {
+  if (input.pressed[BI_A] || input.pressed[BI_B]) {
+    settingsCtx.exitRequested = true;
+    return;
+  }
+
+  bool changed = false;
+  if ((input.pressed[BI_UP] || input.pressed[BI_RIGHT]) && settingsCtx.brightness < 8) {
+    settingsCtx.brightness++;
+    changed = true;
+  }
+  if ((input.pressed[BI_DOWN] || input.pressed[BI_LEFT]) && settingsCtx.brightness > 1) {
+    settingsCtx.brightness--;
+    changed = true;
+  }
+  if (changed) saveBrightness(settingsCtx.brightness);
+
+  // — Draw brightness bar ——————————————————————————————
+  // Rows 3-5: filled bar, 1 column per level (1..8 → cols 0..7).
+  // Row 1 / row 7: bright tick at the current-level column as a cursor.
+  // fbSet guard silently skips diagonal pixels (e.g. col 3 on row 3).
+  fbClear();
+  uint8_t barBright = 180;
+  for (int x = 0; x < settingsCtx.brightness; x++) {
+    fbSet(x, 3, barBright);
+    fbSet(x, 4, barBright);
+    fbSet(x, 5, barBright);
+  }
+  // Bright tick marks above and below the active column
+  int edge = settingsCtx.brightness - 1;
+  fbSet(edge, 1, 255);
+  fbSet(edge, 7, 255);
+  fbPush();
+}
+
 // ============================================================ menu =========
 
-const char* MENU_ITEMS[] = { "SNAKE", "SIMON", "WELCOME" };
+const char* MENU_ITEMS[] = { "SNAKE", "SIMON", "WELCOME", "SETTINGS" };
 const int   MENU_LEN     = sizeof(MENU_ITEMS) / sizeof(MENU_ITEMS[0]);
 static int  menuIdx      = 0;
 
@@ -649,6 +724,7 @@ enum AppState {
   ST_MENU,
   ST_SNAKE,
   ST_SIMON,
+  ST_SETTINGS,
 };
 
 static AppState appState = ST_BOOT_SWEEP;
@@ -665,6 +741,7 @@ static void enterState(AppState s) {
     case ST_MENU:           menuEnter(); break;
     case ST_SNAKE:          snakeReset(); break;
     case ST_SIMON:          simonReset(); break;
+    case ST_SETTINGS:       settingsReset(); break;
     default: break;
   }
 }
@@ -718,6 +795,8 @@ static void frontKnightRiderUpdate() {
     float dist       = fabsf(pos - (float)i);
     // Soft glow: full brightness within 0.5 px, fades out to 1.5 px
     float brightness = (dist < 1.5f) ? (1.0f - dist / 1.5f) : 0.0f;
+    // Scale by global brightness setting
+    brightness *= (float)g_brightness / 8.0f;
     // Invert for active-low: duty 0 = fully on, 1000 = fully off
     int duty = 1000 - (int)(brightness * 1000.0f);
     analogWrite(FRONT_LEDS[i], duty);
@@ -754,6 +833,9 @@ void setup() {
 
   // Seed RNG from a floating ADC pin if available; otherwise use micros().
   randomSeed(micros() ^ analogRead(A0));
+
+  // Load persisted brightness from flash-backed EEPROM
+  loadBrightness();
 
   // SAO GPIO PWM (must come after randomSeed / analogRead so ADC init is done)
   saoSetup();
@@ -811,9 +893,10 @@ void loop() {
       menuStep();
       if (input.pressed[BI_A]) {
         switch (menuIdx) {
-          case 0: enterState(ST_SNAKE); break;
-          case 1: enterState(ST_SIMON); break;
+          case 0: enterState(ST_SNAKE);          break;
+          case 1: enterState(ST_SIMON);          break;
           case 2: enterState(ST_WELCOME_SCROLL); break;
+          case 3: enterState(ST_SETTINGS);       break;
         }
       }
       break;
@@ -828,6 +911,12 @@ void loop() {
     case ST_SIMON: {
       simonStep();
       if (simon.exitRequested) enterState(ST_MENU);
+      break;
+    }
+
+    case ST_SETTINGS: {
+      settingsStep();
+      if (settingsCtx.exitRequested) enterState(ST_MENU);
       break;
     }
   }
