@@ -19,12 +19,12 @@ To flash: hold `BOOTSEL`, press and release `RESET`, release `BOOTSEL` → devic
 
 | GPIO | Pin | Function | Schematic Net |
 |---|---|---|---|
-| GPIO9 | 12 | **A** button (SW2) | RP_BTN_A |
-| GPIO10 | 13 | **B** button (SW4) | RP_BTN_B |
-| GPIO11 | 14 | **Up** (SW5) | RP_BTN_UP |
-| GPIO12 | 15 | **Down** (SW8) | RP_BTN_DWN |
-| GPIO13 | 16 | **Left** (SW6) | RP_BTN_LFT |
-| GPIO14 | 17 | **Right** (SW7) | RP_BTN_RGT |
+| GPIO8 | 12 | **A** button (SW2) | RP_BTN_A |
+| GPIO9 | 13 | **B** button (SW4) | RP_BTN_B |
+| GPIO10 | 14 | **Up** (SW5) | RP_BTN_UP |
+| GPIO11 | 15 | **Down** (SW8) | RP_BTN_DWN |
+| GPIO12 | 16 | **Left** (SW6) | RP_BTN_LFT |
+| GPIO13 | 17 | **Right** (SW7) | RP_BTN_RGT |
 
 All buttons short to GND when pressed — there are no external pull-ups, so configure with `gpio_pull_up()` (or equivalent in your SDK).
 
@@ -32,11 +32,11 @@ All buttons short to GND when pressed — there are no external pull-ups, so con
 
 | GPIO | Pin | Function | Notes |
 |---|---|---|---|
-| GPIO15 | 18 | **Flashlight LEDs** (FLED1–3) | Drives MOSFET Q1 gate (FL_LED net). Set HIGH to turn on. |
-| GPIO23 | 35 | Front LED 1 | Direct drive |
-| GPIO24 | 36 | Front LED 2 | Direct drive |
-| GPIO25 | 37 | Front LED 3 | Direct drive |
-| GPIO26 / ADC0 | 38 | Front LED 4 | Direct drive (ADC capable but used as LED) |
+| GPIO14 | 18 | **Flashlight LEDs** (FLED1–3) | Drives MOSFET Q1 gate (FL_LED net). Set HIGH to turn on. |
+| GPIO20 | 35 | Front LED 1 | Direct drive |
+| GPIO21 | 36 | Front LED 2 | Direct drive |
+| GPIO22 | 37 | Front LED 3 | Direct drive |
+| GPIO23 / ADC0 | 38 | Front LED 4 | Direct drive (ADC capable but used as LED) |
 
 ## 🟦 LED Matrix (9×9 Charlieplex via IS31FL3731)
 
@@ -44,8 +44,8 @@ The 9×9 matrix is driven by the IS31FL3731 (U1). You don't talk to the LEDs dir
 
 | GPIO | Pin | Function |
 |---|---|---|
-| GPIO2 | 4 | **SDA_LED** → IS31FL3731 SDA |
-| GPIO3 | 5 | **SCL_LED** → IS31FL3731 SCL |
+| GPIO4 | 4 | **SDA_LED** → IS31FL3731 SDA |
+| GPIO5 | 5 | **SCL_LED** → IS31FL3731 SCL |
 
 The IS31FL3731 has its `AD` pin tied to GND, so its I²C address is `0x74`. There are existing libraries for this chip (CircuitPython, Adafruit, etc.).
 
