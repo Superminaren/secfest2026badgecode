@@ -15,27 +15,75 @@
 #include <Adafruit_IS31FL3731.h>
 #include <EEPROM.h>
 #include "font4x7.h"
+#include "badge_config.h"
+#include "serial_games.h"
+
+static SerialGames serialGames;
 
 // ============================================================ pin map =======
 
 #define MATRIX_BRIGHTNESS 20
 
-// ============================================================ brightness =====
-// Global brightness scale: 1 (dim) … 8 (full).
-// Stored in EEPROM byte 0; loaded at boot, saved whenever changed.
-#define EEPROM_SIZE        4
-#define EEPROM_ADDR_BRIGHT 0
-static uint8_t g_brightness = 8;   // 1..8
+// ============================================================ config / EEPROM =
+// g_cfg is the live badge configuration. Load on boot, save whenever changed.
+// Helpers declared here, defined below (badge_config.h has extern declarations).
+BadgeConfig g_cfg = BADGE_CONFIG_DEFAULT;
 
-static void loadBrightness() {
-  EEPROM.begin(EEPROM_SIZE);
-  uint8_t v = EEPROM.read(EEPROM_ADDR_BRIGHT);
-  g_brightness = (v >= 1 && v <= 8) ? v : 8;
+// Convenience shorthand — used throughout the file
+#define g_brightness  g_cfg.brightness
+#define g_flashBright g_cfg.flashBright
+
+void configLoad() {
+  EEPROM.begin(EEPROM_CFG_SIZE);
+  uint8_t bright = EEPROM.read(EEPROM_ADDR_BRIGHT);
+  g_cfg.brightness  = (bright  >= 1 && bright  <= 8) ? bright  : 8;
+  uint8_t flash  = EEPROM.read(EEPROM_ADDR_FLASH);
+  g_cfg.flashBright = (flash   >= 1 && flash   <= 8) ? flash   : 8;
+  for (uint8_t i = 0; i < IR_BTN_COUNT; i++) {
+    uint16_t base = EEPROM_ADDR_IR_BASE + i * 4;
+    uint8_t proto = EEPROM.read(base);
+    if (proto > IR_PROTO_RC5) {
+      // uninitialised — use default
+      g_cfg.ir[i] = BADGE_CONFIG_DEFAULT.ir[i];
+    } else {
+      g_cfg.ir[i].protocol = proto;
+      g_cfg.ir[i].addr_lo  = EEPROM.read(base + 1);
+      g_cfg.ir[i].addr_hi  = EEPROM.read(base + 2);
+      g_cfg.ir[i].command  = EEPROM.read(base + 3);
+    }
+  }
 }
 
-static void saveBrightness(uint8_t v) {
-  g_brightness = v;
-  EEPROM.write(EEPROM_ADDR_BRIGHT, v);
+void configSave() {
+  EEPROM.write(EEPROM_ADDR_BRIGHT, g_cfg.brightness);
+  EEPROM.write(EEPROM_ADDR_FLASH,  g_cfg.flashBright);
+  for (uint8_t i = 0; i < IR_BTN_COUNT; i++) {
+    uint16_t base = EEPROM_ADDR_IR_BASE + i * 4;
+    EEPROM.write(base,     g_cfg.ir[i].protocol);
+    EEPROM.write(base + 1, g_cfg.ir[i].addr_lo);
+    EEPROM.write(base + 2, g_cfg.ir[i].addr_hi);
+    EEPROM.write(base + 3, g_cfg.ir[i].command);
+  }
+  EEPROM.commit();
+}
+
+void configSaveBrightness() {
+  EEPROM.write(EEPROM_ADDR_BRIGHT, g_cfg.brightness);
+  EEPROM.commit();
+}
+
+void configSaveFlash() {
+  EEPROM.write(EEPROM_ADDR_FLASH, g_cfg.flashBright);
+  EEPROM.commit();
+}
+
+void configSaveIr(uint8_t idx) {
+  if (idx >= IR_BTN_COUNT) return;
+  uint16_t base = EEPROM_ADDR_IR_BASE + idx * 4;
+  EEPROM.write(base,     g_cfg.ir[idx].protocol);
+  EEPROM.write(base + 1, g_cfg.ir[idx].addr_lo);
+  EEPROM.write(base + 2, g_cfg.ir[idx].addr_hi);
+  EEPROM.write(base + 3, g_cfg.ir[idx].command);
   EEPROM.commit();
 }
 
@@ -49,7 +97,7 @@ static void saveBrightness(uint8_t v) {
 #define SAO_GP1	  0
 #define SAO_GP2   1
 
-#define LED_FLASHLIGHT 15
+#define LED_FLASHLIGHT 14
 #define LED_FRONT_1    20
 #define LED_FRONT_2    21
 #define LED_FRONT_3    22
@@ -59,9 +107,9 @@ static void saveBrightness(uint8_t v) {
 #define LED_MATRIX_SCL 5
 #define IS31_ADDR      0x74
 
-// Front LEDs are active-low (anode to 3V3, cathode to GPIO via series R).
-const int FRONT_LED_ON  = LOW;
-const int FRONT_LED_OFF = HIGH;
+// Front LEDs are active-high (anode to GPIO, cathode to GND).
+const int FRONT_LED_ON  = HIGH;
+const int FRONT_LED_OFF = LOW;
 const int FRONT_LEDS[]  = { LED_FRONT_1, LED_FRONT_2, LED_FRONT_3, LED_FRONT_4 };
 const int NUM_FRONT_LEDS = 4;
 
@@ -665,7 +713,7 @@ static void settingsStep() {
     settingsCtx.brightness--;
     changed = true;
   }
-  if (changed) saveBrightness(settingsCtx.brightness);
+  if (changed) { g_brightness = settingsCtx.brightness; configSaveBrightness(); }
 
   // — Draw brightness bar ——————————————————————————————
   // Rows 3-5: filled bar, 1 column per level (1..8 → cols 0..7).
@@ -685,9 +733,174 @@ static void settingsStep() {
   fbPush();
 }
 
+// ============================================================ IR sender ======
+//
+// Software IR modulation on LED_FLASHLIGHT (GPIO15 → MOSFET → IR/white LEDs).
+// Implements NEC (32-bit) and Samsung (which is NEC-compatible but with a
+// repeated address byte).  Sony SIRC-12 is also supported.
+//
+// Blocking during transmission (~67 ms for NEC), but called only on user input.
+
+#define IR_PIN       LED_FLASHLIGHT
+#define IR_FREQ_NEC  38000
+#define IR_FREQ_SONY 40000
+
+static void irOn(uint16_t us) {
+  // 33 % duty is standard for IR LEDs — avoids overheating
+  analogWrite(IR_PIN, 333);
+  delayMicroseconds(us);
+}
+static void irOff(uint16_t us) {
+  analogWrite(IR_PIN, 0);
+  delayMicroseconds(us);
+}
+
+static void irSendNEC(uint16_t address, uint8_t command, bool samsung = false) {
+  analogWriteFreq(IR_FREQ_NEC);
+  analogWriteRange(1000);
+  // Header: 9 ms burst + 4.5 ms space
+  irOn(9000);
+  irOff(samsung ? 4500 : 4500);   // Samsung header is identical to NEC here
+  // 16-bit address (8-bit addr + ~addr for NEC; 8-bit addr repeated for Samsung)
+  uint8_t a1 = (uint8_t)(address & 0xFF);
+  uint8_t a2 = samsung ? a1 : (uint8_t)(~a1 & 0xFF);
+  uint8_t c1 = command;
+  uint8_t c2 = (uint8_t)(~c1 & 0xFF);
+  for (int i = 0; i < 8; i++) { irOn(562); irOff((a1 >> i) & 1 ? 1687 : 562); }
+  for (int i = 0; i < 8; i++) { irOn(562); irOff((a2 >> i) & 1 ? 1687 : 562); }
+  for (int i = 0; i < 8; i++) { irOn(562); irOff((c1 >> i) & 1 ? 1687 : 562); }
+  for (int i = 0; i < 8; i++) { irOn(562); irOff((c2 >> i) & 1 ? 1687 : 562); }
+  irOn(562);
+  analogWrite(IR_PIN, 0);
+}
+
+static void irSendSony(uint16_t address, uint8_t command) {
+  analogWriteFreq(IR_FREQ_SONY);
+  analogWriteRange(1000);
+  irOn(2400); irOff(600);
+  for (int i = 6; i >= 0; i--) { irOn((command >> i) & 1 ? 1200 : 600); irOff(600); }
+  for (int i = 4; i >= 0; i--) { irOn((address >> i) & 1 ? 1200 : 600); irOff(600); }
+  analogWrite(IR_PIN, 0);
+}
+
+static void irSendCode(const IrCode& c) {
+  uint16_t addr = irCodeAddr(c);
+  switch (c.protocol) {
+    case IR_PROTO_NEC:     irSendNEC(addr, c.command, false); break;
+    case IR_PROTO_SAMSUNG: irSendNEC(addr, c.command, true);  break;
+    case IR_PROTO_SONY:    irSendSony(addr, c.command);       break;
+    case IR_PROTO_RC5:     irSendNEC(addr, c.command, false); break; // fallback
+  }
+}
+
+// ============================================================ flashlight =====
+//
+// All four front LEDs continue their Knight Rider animation in the background.
+// LED_FLASHLIGHT (GPIO15) is PWM'd at variable duty for the flashlight.
+//   Level 8 → duty 1000 (constant on, maximum output)
+//   Level 1 → duty 125 (dim — still on, no strobe at minimum)
+// Up/Down → adjust brightness level.   B → exit to menu.
+
+struct FlashState {
+  bool exitRequested;
+};
+static FlashState flashCtx;
+
+static void flashApply() {
+  int duty = (int)((float)g_flashBright / 8.0f * 1000.0f);
+  analogWriteFreq(1000);
+  analogWriteRange(1000);
+  analogWrite(IR_PIN, duty);
+}
+
+static void flashReset() {
+  flashCtx.exitRequested = false;
+  flashApply();
+}
+
+static void flashStep() {
+  if (input.pressed[BI_B]) {
+    flashCtx.exitRequested = true;
+    analogWrite(IR_PIN, 0);   // off when leaving
+    return;
+  }
+  bool changed = false;
+  if (input.pressed[BI_UP]   && g_flashBright < 8) { g_flashBright++; changed = true; }
+  if (input.pressed[BI_DOWN] && g_flashBright > 1) { g_flashBright--; changed = true; }
+  if (changed) { configSaveFlash(); flashApply(); }
+
+  // Draw brightness level bar on matrix (rows 3-5, same style as Settings)
+  fbClear();
+  uint8_t bar = 180;
+  for (int x = 0; x < g_flashBright; x++) {
+    fbSet(x, 3, bar);
+    fbSet(x, 4, bar);
+    fbSet(x, 5, bar);
+  }
+  int edge = g_flashBright - 1;
+  fbSet(edge, 1, 255);
+  fbSet(edge, 7, 255);
+  // Torch icon — two pixels above bar
+  fbSet(3, 0, 200); fbSet(4, 0, 255); fbSet(5, 0, 200);
+  fbPush();
+}
+
+// ============================================================ IR remote ======
+//
+// Each directional/A/B button sends the configured IR code.
+// A+B held simultaneously exits.  The matrix shows a remote icon.
+// The front LEDs continue Knight Rider in the background.
+
+static unsigned long irLastSend = 0;
+static bool irExitRequested = false;
+
+static void irRemoteReset() {
+  irExitRequested = false;
+  irLastSend = 0;
+}
+
+static void irRemoteDrawIcon() {
+  fbClear();
+  // Stylised remote outline on 9×9 matrix
+  for (int y = 1; y <= 7; y++) { fbSet(2, y, 80); fbSet(6, y, 80); }
+  for (int x = 2; x <= 6; x++) { fbSet(x, 1, 80); fbSet(x, 7, 80); }
+  fbSet(4, 2, 200);  // top button
+  fbSet(3, 4, 120); fbSet(5, 4, 120);  // side buttons
+  fbSet(4, 5, 120);  // bottom button
+  fbPush();
+}
+
+static void irRemoteStep() {
+  // Exit on A+B held together
+  if (input.down[BI_A] && input.down[BI_B]) {
+    irExitRequested = true;
+    analogWrite(IR_PIN, 0);
+    return;
+  }
+
+  unsigned long now = millis();
+  // 200 ms gap between sends to avoid flooding
+  if (now - irLastSend < 200) { irRemoteDrawIcon(); return; }
+
+  static const int BTN_MAP[IR_BTN_COUNT] = {
+    BI_A, BI_B, BI_UP, BI_DOWN, BI_LEFT, BI_RIGHT
+  };
+  for (int i = 0; i < IR_BTN_COUNT; i++) {
+    if (input.pressed[BTN_MAP[i]]) {
+      // Flash all front LEDs briefly to indicate send
+      for (int p : FRONT_LEDS) analogWrite(p, 1000);
+      irSendCode(g_cfg.ir[i]);
+      for (int p : FRONT_LEDS) analogWrite(p, 0);
+      irLastSend = now;
+      break;
+    }
+  }
+  irRemoteDrawIcon();
+}
+
 // ============================================================ menu =========
 
-const char* MENU_ITEMS[] = { "SNAKE", "SIMON", "WELCOME", "SETTINGS" };
+const char* MENU_ITEMS[] = { "SNAKE", "SIMON", "WELCOME", "SETTINGS", "FLASHLIGHT", "IR REMOTE" };
 const int   MENU_LEN     = sizeof(MENU_ITEMS) / sizeof(MENU_ITEMS[0]);
 static int  menuIdx      = 0;
 
@@ -725,6 +938,8 @@ enum AppState {
   ST_SNAKE,
   ST_SIMON,
   ST_SETTINGS,
+  ST_FLASHLIGHT,
+  ST_IR_REMOTE,
 };
 
 static AppState appState = ST_BOOT_SWEEP;
@@ -742,6 +957,8 @@ static void enterState(AppState s) {
     case ST_SNAKE:          snakeReset(); break;
     case ST_SIMON:          simonReset(); break;
     case ST_SETTINGS:       settingsReset(); break;
+    case ST_FLASHLIGHT:     flashReset(); break;
+    case ST_IR_REMOTE:      irRemoteReset(); break;
     default: break;
   }
 }
@@ -776,29 +993,42 @@ static void saoUpdate() {
 // Passive background animation: a bright spot sweeps back and forth across
 // the four front LEDs using hardware PWM.
 //
-// Front LEDs are active-low (anode → 3V3, cathode → GPIO):
-//   analogWrite duty 0    = pin always LOW  = LED fully ON
-//   analogWrite duty 1000 = pin always HIGH = LED fully OFF
+// Front LEDs are active-HIGH (anode → GPIO, cathode → GND via resistor):
+//   analogWrite duty 0    = pin always LOW  = LED fully OFF
+//   analogWrite duty 1000 = pin always HIGH = LED fully ON
+//
+// g_brightness controls sweep depth:
+//   8 → all LEDs constantly fully on (no animation)
+//   1 → full Knight Rider sweep (background goes dark, peak is fully on)
+//   2-7 → intermediate — background LEDs stay at a raised floor level
 //
 // The sweep is skipped while ST_SNAKE or ST_SIMON own the front LEDs.
 
 static void frontKnightRiderUpdate() {
-  if (appState == ST_SNAKE || appState == ST_SIMON) return;
+  if (appState == ST_SNAKE || appState == ST_SIMON || appState == ST_IR_REMOTE) return;
+
+  if (g_brightness >= 8) {
+    // Brightness at maximum → all LEDs constantly on, no animation
+    for (int i = 0; i < NUM_FRONT_LEDS; i++) analogWrite(FRONT_LEDS[i], 1000);
+    return;
+  }
 
   // Triangle wave, period 800 ms → position sweeps 0.0 → 3.0 → 0.0
   const float period = 800.0f;
-  float t   = fmodf((float)millis(), period) / period; // 0 .. 1
-  float tri = (t < 0.5f) ? (t * 2.0f) : (2.0f - t * 2.0f); // 0 .. 1 .. 0
-  float pos = tri * 3.0f;                              // 0.0 .. 3.0
+  float t   = fmodf((float)millis(), period) / period;
+  float tri = (t < 0.5f) ? (t * 2.0f) : (2.0f - t * 2.0f);
+  float pos = tri * 3.0f;
+
+  // animDepth: 1 = full sweep at level 1, 0 = no sweep at level 8
+  float animDepth = (float)(8 - g_brightness) / 7.0f;  // 1 at level 1, ~0 at level 7
+  // floor = minimum duty at the dark end of the sweep
+  float floor_val = 1.0f - animDepth;
 
   for (int i = 0; i < NUM_FRONT_LEDS; i++) {
-    float dist       = fabsf(pos - (float)i);
-    // Soft glow: full brightness within 0.5 px, fades out to 1.5 px
-    float brightness = (dist < 1.5f) ? (1.0f - dist / 1.5f) : 0.0f;
-    // Scale by global brightness setting
-    brightness *= (float)g_brightness / 8.0f;
-    // Invert for active-low: duty 0 = fully on, 1000 = fully off
-    int duty = 1000 - (int)(brightness * 1000.0f);
+    float dist   = fabsf(pos - (float)i);
+    float peak   = (dist < 1.5f) ? (1.0f - dist / 1.5f) : 0.0f;
+    float bright = floor_val + (1.0f - floor_val) * peak;  // never below floor_val
+    int duty = (int)(bright * 1000.0f);
     analogWrite(FRONT_LEDS[i], duty);
   }
 }
@@ -834,8 +1064,11 @@ void setup() {
   // Seed RNG from a floating ADC pin if available; otherwise use micros().
   randomSeed(micros() ^ analogRead(A0));
 
-  // Load persisted brightness from flash-backed EEPROM
-  loadBrightness();
+  // Load persisted config (brightness, flashlight brightness, IR codes)
+  configLoad();
+
+  // Serial terminal games (Mastermind, Hangman, Minesweeper)
+  serialGames.begin();
 
   // SAO GPIO PWM (must come after randomSeed / analogRead so ADC init is done)
   saoSetup();
@@ -846,6 +1079,7 @@ void setup() {
 // ============================================================ loop =========
 
 void loop() {
+  serialGames.update();        // USB-CDC terminal games (non-blocking)
   saoUpdate();                 // SAO GP1 sin-wave PWM, GP2 constant 10 %
   frontKnightRiderUpdate();    // front LED Knight Rider sweep
   inputUpdate();
@@ -897,6 +1131,8 @@ void loop() {
           case 1: enterState(ST_SIMON);          break;
           case 2: enterState(ST_WELCOME_SCROLL); break;
           case 3: enterState(ST_SETTINGS);       break;
+          case 4: enterState(ST_FLASHLIGHT);     break;
+          case 5: enterState(ST_IR_REMOTE);      break;
         }
       }
       break;
@@ -917,6 +1153,18 @@ void loop() {
     case ST_SETTINGS: {
       settingsStep();
       if (settingsCtx.exitRequested) enterState(ST_MENU);
+      break;
+    }
+
+    case ST_FLASHLIGHT: {
+      flashStep();
+      if (flashCtx.exitRequested) enterState(ST_MENU);
+      break;
+    }
+
+    case ST_IR_REMOTE: {
+      irRemoteStep();
+      if (irExitRequested) enterState(ST_MENU);
       break;
     }
   }
