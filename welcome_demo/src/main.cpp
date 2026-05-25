@@ -65,6 +65,25 @@ void configLoad() {
     }
   }
   g_cfg.name[NAME_MAX_LEN - 1] = '\0';
+
+  // Load new settings fields — validate each, fall back to default if uninitialised
+  uint8_t ledAnim = EEPROM.read(EEPROM_ADDR_LED_ANIM);
+  g_cfg.ledAnim = (ledAnim < LED_ANIM_COUNT) ? ledAnim : BADGE_CONFIG_DEFAULT.ledAnim;
+
+  uint8_t idleEn = EEPROM.read(EEPROM_ADDR_IDLE_ENABLE);
+  g_cfg.idleEnable = (idleEn <= 1) ? idleEn : BADGE_CONFIG_DEFAULT.idleEnable;
+
+  uint8_t idleTo = EEPROM.read(EEPROM_ADDR_IDLE_TIMEOUT);
+  g_cfg.idleTimeoutSec = (idleTo >= 5 && idleTo <= 60) ? idleTo : BADGE_CONFIG_DEFAULT.idleTimeoutSec;
+
+  uint8_t mScroll = EEPROM.read(EEPROM_ADDR_MENU_SCROLL);
+  g_cfg.menuScrollMs = (mScroll >= 20 && mScroll <= 150) ? mScroll : BADGE_CONFIG_DEFAULT.menuScrollMs;
+
+  uint8_t iScroll = EEPROM.read(EEPROM_ADDR_IDLE_SCROLL);
+  g_cfg.idleScrollMs = (iScroll >= 10 && iScroll <= 100) ? iScroll : BADGE_CONFIG_DEFAULT.idleScrollMs;
+
+  uint8_t nScroll = EEPROM.read(EEPROM_ADDR_NAME_SCROLL);
+  g_cfg.nameScrollMs = (nScroll >= 20 && nScroll <= 150) ? nScroll : BADGE_CONFIG_DEFAULT.nameScrollMs;
 }
 
 void configSave() {
@@ -79,12 +98,28 @@ void configSave() {
   }
   for (uint8_t i = 0; i < NAME_MAX_LEN; i++)
     EEPROM.write(EEPROM_ADDR_NAME + i, (uint8_t)g_cfg.name[i]);
+  EEPROM.write(EEPROM_ADDR_LED_ANIM,     g_cfg.ledAnim);
+  EEPROM.write(EEPROM_ADDR_IDLE_ENABLE,  g_cfg.idleEnable);
+  EEPROM.write(EEPROM_ADDR_IDLE_TIMEOUT, g_cfg.idleTimeoutSec);
+  EEPROM.write(EEPROM_ADDR_MENU_SCROLL,  g_cfg.menuScrollMs);
+  EEPROM.write(EEPROM_ADDR_IDLE_SCROLL,  g_cfg.idleScrollMs);
+  EEPROM.write(EEPROM_ADDR_NAME_SCROLL,  g_cfg.nameScrollMs);
   EEPROM.commit();
 }
 
 void configSaveName() {
   for (uint8_t i = 0; i < NAME_MAX_LEN; i++)
     EEPROM.write(EEPROM_ADDR_NAME + i, (uint8_t)g_cfg.name[i]);
+  EEPROM.commit();
+}
+
+void configSaveSettings() {
+  EEPROM.write(EEPROM_ADDR_LED_ANIM,     g_cfg.ledAnim);
+  EEPROM.write(EEPROM_ADDR_IDLE_ENABLE,  g_cfg.idleEnable);
+  EEPROM.write(EEPROM_ADDR_IDLE_TIMEOUT, g_cfg.idleTimeoutSec);
+  EEPROM.write(EEPROM_ADDR_MENU_SCROLL,  g_cfg.menuScrollMs);
+  EEPROM.write(EEPROM_ADDR_IDLE_SCROLL,  g_cfg.idleScrollMs);
+  EEPROM.write(EEPROM_ADDR_NAME_SCROLL,  g_cfg.nameScrollMs);
   EEPROM.commit();
 }
 
@@ -953,8 +988,7 @@ const char* MENU_ITEMS[] = {
 const int   MENU_LEN = sizeof(MENU_ITEMS) / sizeof(MENU_ITEMS[0]);
 static int  menuIdx  = 0;
 
-// Idle screensaver — shown after IDLE_TIMEOUT_MS of no button activity in menu
-#define IDLE_TIMEOUT_MS 8000
+// Idle screensaver — timeout and speeds come from g_cfg at runtime
 static const char* const IDLE_MSGS[] = {
   "HACK THE PLANET",
   "CTRL ALT DEFEAT",
@@ -977,14 +1011,13 @@ static uint8_t       menuIdleMsgIdx      = 0;
 static bool          menuIdlePausing     = false;
 static unsigned long menuIdlePauseUntil  = 0;
 
-#define IDLE_SCROLL_MS  45    // px/step for idle messages (faster than menu)
-#define IDLE_PAUSE_MS   1200  // blank gap between messages
+#define IDLE_PAUSE_MS 1200  // blank gap between idle messages (not configurable)
 
 static void menuEnter() {
   menuLastActivity   = millis();
   menuIdle           = false;
   menuIdlePausing    = false;
-  scrollStart(MENU_ITEMS[menuIdx], 50, MATRIX_BRIGHTNESS);
+  scrollStart(MENU_ITEMS[menuIdx], g_cfg.menuScrollMs, MATRIX_BRIGHTNESS);
 }
 
 static void menuStep() {
@@ -1001,36 +1034,35 @@ static void menuStep() {
 
   // Any other button press wakes from idle without consuming the press
   if (anyPressed() && menuIdle) {
-    menuIdle        = false;
-    menuIdlePausing = false;
+    menuIdle         = false;
+    menuIdlePausing  = false;
     menuLastActivity = millis();
-    scrollStart(MENU_ITEMS[menuIdx], 50, MATRIX_BRIGHTNESS);
+    scrollStart(MENU_ITEMS[menuIdx], g_cfg.menuScrollMs, MATRIX_BRIGHTNESS);
   }
 
-  // Enter idle if no activity for IDLE_TIMEOUT_MS
-  if (!menuIdle && (millis() - menuLastActivity) >= IDLE_TIMEOUT_MS) {
+  // Enter idle if screensaver enabled and inactive long enough
+  unsigned long idleMs = (unsigned long)g_cfg.idleTimeoutSec * 1000UL;
+  if (g_cfg.idleEnable && !menuIdle && (millis() - menuLastActivity) >= idleMs) {
     menuIdle        = true;
     menuIdlePausing = false;
     menuIdleMsgIdx  = (uint8_t)random(IDLE_MSG_COUNT);
-    scrollStart(IDLE_MSGS[menuIdleMsgIdx], IDLE_SCROLL_MS, MATRIX_BRIGHTNESS);
+    scrollStart(IDLE_MSGS[menuIdleMsgIdx], g_cfg.idleScrollMs, MATRIX_BRIGHTNESS);
   }
 
   scrollRenderTick();
   if (scroller.done) {
     if (menuIdle) {
       if (!menuIdlePausing) {
-        // Message just finished — begin blank pause
-        menuIdlePausing   = true;
+        menuIdlePausing    = true;
         menuIdlePauseUntil = millis() + IDLE_PAUSE_MS;
         fbClear();
       } else if (millis() >= menuIdlePauseUntil) {
-        // Pause over — start next message
         menuIdlePausing = false;
         menuIdleMsgIdx  = (menuIdleMsgIdx + 1) % IDLE_MSG_COUNT;
-        scrollStart(IDLE_MSGS[menuIdleMsgIdx], IDLE_SCROLL_MS, MATRIX_BRIGHTNESS);
+        scrollStart(IDLE_MSGS[menuIdleMsgIdx], g_cfg.idleScrollMs, MATRIX_BRIGHTNESS);
       }
     } else {
-      scrollStart(MENU_ITEMS[menuIdx], 90, MATRIX_BRIGHTNESS);
+      scrollStart(MENU_ITEMS[menuIdx], g_cfg.menuScrollMs, MATRIX_BRIGHTNESS);
     }
   }
   fbPush();
@@ -1064,7 +1096,7 @@ static NameBadgeState nameBadgeCtx;
 static void nameBadgeReset() {
   nameBadgeCtx.exitRequested = false;
   const char* txt = (g_cfg.name[0] != '\0') ? g_cfg.name : "SET YOUR NAME";
-  scrollStart(txt, 70, MATRIX_BRIGHTNESS);
+  scrollStart(txt, g_cfg.nameScrollMs, MATRIX_BRIGHTNESS);
 }
 
 static void nameBadgeStep() {
@@ -1072,7 +1104,7 @@ static void nameBadgeStep() {
   scrollRenderTick();
   if (scroller.done) {
     const char* txt = (g_cfg.name[0] != '\0') ? g_cfg.name : "SET YOUR NAME";
-    scrollStart(txt, 70, MATRIX_BRIGHTNESS);
+    scrollStart(txt, g_cfg.nameScrollMs, MATRIX_BRIGHTNESS);
   }
   fbPush();
 }
@@ -1126,48 +1158,87 @@ static void saoUpdate() {
   analogWrite(SAO_GP1, duty);
 }
 
-// ============================================================ front LED Knight Rider =======
+// ============================================================ front LED animations =====
 //
-// Passive background animation: a bright spot sweeps back and forth across
-// the four front LEDs using hardware PWM.
+// Dispatches to one of several animation modes based on g_cfg.ledAnim.
+// Snake / Simon / IR Remote own the front LEDs — all other states use this.
 //
-// Front LEDs are active-HIGH (anode → GPIO, cathode → GND via resistor):
-//   analogWrite duty 0    = pin always LOW  = LED fully OFF
-//   analogWrite duty 1000 = pin always HIGH = LED fully ON
-//
-// g_brightness controls sweep depth:
-//   8 → all LEDs constantly fully on (no animation)
-//   1 → full Knight Rider sweep (background goes dark, peak is fully on)
-//   2-7 → intermediate — background LEDs stay at a raised floor level
-//
-// The sweep is skipped while ST_SNAKE or ST_SIMON own the front LEDs.
+// All animations respect g_brightness:
+//   8 → full brightness; lower values dim the peak and raise the floor for
+//       KNIGHT mode, or scale the peak duty for other animations.
 
-static void frontKnightRiderUpdate() {
+static void frontLedUpdate() {
   if (appState == ST_SNAKE || appState == ST_SIMON || appState == ST_IR_REMOTE) return;
 
-  if (g_brightness >= 8) {
-    // Brightness at maximum → all LEDs constantly on, no animation
-    for (int i = 0; i < NUM_FRONT_LEDS; i++) analogWrite(FRONT_LEDS[i], 1000);
-    return;
-  }
+  unsigned long now = millis();
+  // Scale factor 0.0–1.0 based on brightness level (used by several modes)
+  float bscale = (float)g_brightness / 8.0f;
+  int   bpeak  = (int)(bscale * 1000.0f);
 
-  // Triangle wave, period 800 ms → position sweeps 0.0 → 3.0 → 0.0
-  const float period = 800.0f;
-  float t   = fmodf((float)millis(), period) / period;
-  float tri = (t < 0.5f) ? (t * 2.0f) : (2.0f - t * 2.0f);
-  float pos = tri * 3.0f;
+  switch (g_cfg.ledAnim) {
 
-  // animDepth: 1 = full sweep at level 1, 0 = no sweep at level 8
-  float animDepth = (float)(8 - g_brightness) / 7.0f;  // 1 at level 1, ~0 at level 7
-  // floor = minimum duty at the dark end of the sweep
-  float floor_val = 1.0f - animDepth;
+    case LED_ANIM_KNIGHT: {
+      if (g_brightness >= 8) {
+        for (int i = 0; i < NUM_FRONT_LEDS; i++) analogWrite(FRONT_LEDS[i], 1000);
+        return;
+      }
+      const float period = 800.0f;
+      float t   = fmodf((float)now, period) / period;
+      float tri = (t < 0.5f) ? (t * 2.0f) : (2.0f - t * 2.0f);
+      float pos = tri * 3.0f;
+      float animDepth = (float)(8 - g_brightness) / 7.0f;
+      float floor_val = 1.0f - animDepth;
+      for (int i = 0; i < NUM_FRONT_LEDS; i++) {
+        float dist   = fabsf(pos - (float)i);
+        float peak   = (dist < 1.5f) ? (1.0f - dist / 1.5f) : 0.0f;
+        float bright = floor_val + (1.0f - floor_val) * peak;
+        analogWrite(FRONT_LEDS[i], (int)(bright * 1000.0f));
+      }
+      break;
+    }
 
-  for (int i = 0; i < NUM_FRONT_LEDS; i++) {
-    float dist   = fabsf(pos - (float)i);
-    float peak   = (dist < 1.5f) ? (1.0f - dist / 1.5f) : 0.0f;
-    float bright = floor_val + (1.0f - floor_val) * peak;  // never below floor_val
-    int duty = (int)(bright * 1000.0f);
-    analogWrite(FRONT_LEDS[i], duty);
+    case LED_ANIM_PULSE: {
+      float t = fmodf((float)now / 2000.0f, 1.0f) * 2.0f * 3.14159265f;
+      int duty = (int)((sinf(t) + 1.0f) * 0.5f * (float)bpeak);
+      for (int i = 0; i < NUM_FRONT_LEDS; i++) analogWrite(FRONT_LEDS[i], duty);
+      break;
+    }
+
+    case LED_ANIM_STROBE: {
+      bool on = ((now / 80) & 1) == 0;
+      int duty = on ? bpeak : 0;
+      for (int i = 0; i < NUM_FRONT_LEDS; i++) analogWrite(FRONT_LEDS[i], duty);
+      break;
+    }
+
+    case LED_ANIM_ALTERNATE: {
+      bool phase = ((now / 250) & 1) != 0;
+      for (int i = 0; i < NUM_FRONT_LEDS; i++) {
+        bool lit = ((bool)(i & 1)) == phase;
+        analogWrite(FRONT_LEDS[i], lit ? bpeak : 0);
+      }
+      break;
+    }
+
+    case LED_ANIM_CHASE: {
+      const float period = 600.0f;
+      float t   = fmodf((float)now, period) / period;
+      float tri = (t < 0.5f) ? (t * 2.0f) : (2.0f - t * 2.0f);
+      float pos = tri * 3.0f;
+      for (int i = 0; i < NUM_FRONT_LEDS; i++) {
+        float dist = fabsf(pos - (float)i);
+        analogWrite(FRONT_LEDS[i], (dist < 0.6f) ? bpeak : 0);
+      }
+      break;
+    }
+
+    case LED_ANIM_ON:
+      for (int i = 0; i < NUM_FRONT_LEDS; i++) analogWrite(FRONT_LEDS[i], bpeak);
+      break;
+
+    case LED_ANIM_OFF:
+      for (int i = 0; i < NUM_FRONT_LEDS; i++) analogWrite(FRONT_LEDS[i], 0);
+      break;
   }
 }
 
@@ -1219,7 +1290,7 @@ void setup() {
 void loop() {
   serialGames.update();        // USB-CDC terminal games (non-blocking)
   saoUpdate();                 // SAO GP1 sin-wave PWM, GP2 constant 10 %
-  frontKnightRiderUpdate();    // front LED Knight Rider sweep
+  frontLedUpdate();            // front LED animation
   inputUpdate();
 
   // Any button press during the intro animations jumps to the menu.

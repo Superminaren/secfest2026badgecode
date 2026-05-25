@@ -124,6 +124,8 @@ private:
   void _cfgOnLine();       // called from _feedChar on Enter
   void _cfgDraw();
   void _cfgShowConfig();
-  static uint8_t _cfgParseBtn(const char* s);  // BI_* or 0xFF
-  static uint8_t _cfgParseProto(const char* s);
+  static uint8_t     _cfgParseBtn(const char* s);    // BI_* or 0xFF
+  static uint8_t     _cfgParseProto(const char* s);  // IR_PROTO_* or 0xFF
+  static uint8_t     _cfgParseAnim(const char* s);   // LED_ANIM_* or 0xFF
+  static const char* _animName(uint8_t a);
 };

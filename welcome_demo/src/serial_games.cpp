@@ -614,6 +614,31 @@ uint8_t SerialGames::_cfgParseProto(const char* s) {
   return 0xFF;
 }
 
+uint8_t SerialGames::_cfgParseAnim(const char* s) {
+  if (strcmp(s,"knight")==0)    return LED_ANIM_KNIGHT;
+  if (strcmp(s,"pulse")==0)     return LED_ANIM_PULSE;
+  if (strcmp(s,"strobe")==0)    return LED_ANIM_STROBE;
+  if (strcmp(s,"alt")==0)       return LED_ANIM_ALTERNATE;
+  if (strcmp(s,"alternate")==0) return LED_ANIM_ALTERNATE;
+  if (strcmp(s,"chase")==0)     return LED_ANIM_CHASE;
+  if (strcmp(s,"on")==0)        return LED_ANIM_ON;
+  if (strcmp(s,"off")==0)       return LED_ANIM_OFF;
+  return 0xFF;
+}
+
+const char* SerialGames::_animName(uint8_t a) {
+  switch (a) {
+    case LED_ANIM_KNIGHT:    return "KNIGHT";
+    case LED_ANIM_PULSE:     return "PULSE";
+    case LED_ANIM_STROBE:    return "STROBE";
+    case LED_ANIM_ALTERNATE: return "ALTERNATE";
+    case LED_ANIM_CHASE:     return "CHASE";
+    case LED_ANIM_ON:        return "ON";
+    case LED_ANIM_OFF:       return "OFF";
+  }
+  return "?";
+}
+
 void SerialGames::_cfgStart() {
   _st       = St::CONFIG;
   _lineMode = true;
@@ -629,19 +654,22 @@ void SerialGames::_cfgDraw() {
     "  ║           BADGE  CONFIG                     ║\r\n"
     "  ╚══════════════════════════════════════════════╝\r\n"
     RST "\r\n"
-    GRY
-    "  Commands (case-insensitive):\r\n"
-    "  " RST BLD "show" RST GRY "                     — print current settings\r\n"
-    "  " RST BLD "name <yourname>" RST GRY "          — set badge owner name (shown on matrix)\r\n"
-    "  " RST BLD "bright matrix <1-8>" RST GRY "     — set matrix / LED animation depth\r\n"
-    "  " RST BLD "bright flash <1-8>" RST GRY "      — set flashlight brightness\r\n"
+    GRY "  Commands (case-insensitive):\r\n\r\n"
+    "  " RST BLD "show" RST GRY "                        — print all current settings\r\n"
+    "  " RST BLD "name <yourname>" RST GRY "             — set badge owner name (matrix name-badge)\r\n"
+    "  " RST BLD "bright matrix <1-8>" RST GRY "        — matrix brightness / LED sweep depth\r\n"
+    "  " RST BLD "bright flash <1-8>" RST GRY "         — flashlight brightness\r\n"
+    "  " RST BLD "led <mode>" RST GRY "                 — front LED animation\r\n"
+    "      " RST "modes: knight  pulse  strobe  alt  chase  on  off\r\n" GRY
+    "  " RST BLD "idle on" RST " / " BLD "off" RST GRY "               — enable/disable screensaver\r\n"
+    "  " RST BLD "idle timeout <5-60>" RST GRY "        — seconds of inactivity before screensaver\r\n"
+    "  " RST BLD "scroll menu <20-150>" RST GRY "       — menu item scroll speed (ms/pixel)\r\n"
+    "  " RST BLD "scroll idle <10-100>" RST GRY "       — screensaver message speed (ms/pixel)\r\n"
+    "  " RST BLD "scroll name <20-150>" RST GRY "       — name-badge scroll speed (ms/pixel)\r\n"
     "  " RST BLD "ir <btn> <proto> <addr> <cmd>" RST GRY "\r\n"
-    "      btn   = A B UP DOWN LEFT RIGHT\r\n"
-    "      proto = NEC SAMSUNG SONY RC5\r\n"
-    "      addr  = 0x…  (16-bit hex)\r\n"
-    "      cmd   = 0x…  (8-bit hex)\r\n"
-    "  " RST BLD "default" RST GRY "                 — restore factory defaults\r\n"
-    "  " RST BLD "q / back" RST GRY "               — return to main menu\r\n"
+    "      btn=A/B/UP/DOWN/LEFT/RIGHT  proto=NEC/SAMSUNG/SONY/RC5\r\n"
+    "  " RST BLD "default" RST GRY "                    — restore factory defaults\r\n"
+    "  " RST BLD "q / back" RST GRY "                  — return to main menu\r\n"
     RST "\r\n"
     "  > "
   );
@@ -653,6 +681,13 @@ void SerialGames::_cfgShowConfig() {
                 g_cfg.name[0] ? g_cfg.name : "(not set)");
   Serial.printf("  Matrix brightness : " BLD "%d" RST "/8\r\n", g_cfg.brightness);
   Serial.printf("  Flash brightness  : " BLD "%d" RST "/8\r\n", g_cfg.flashBright);
+  Serial.printf("  LED animation     : " BLD "%s" RST "\r\n", _animName(g_cfg.ledAnim));
+  Serial.print("\r\n");
+  Serial.printf("  Screensaver       : " BLD "%s" RST "\r\n", g_cfg.idleEnable ? "ON" : "OFF");
+  Serial.printf("  Idle timeout      : " BLD "%d" RST " s\r\n", g_cfg.idleTimeoutSec);
+  Serial.printf("  Scroll  menu      : " BLD "%d" RST " ms/px\r\n", g_cfg.menuScrollMs);
+  Serial.printf("  Scroll  idle      : " BLD "%d" RST " ms/px\r\n", g_cfg.idleScrollMs);
+  Serial.printf("  Scroll  name      : " BLD "%d" RST " ms/px\r\n", g_cfg.nameScrollMs);
   Serial.print("\r\n");
   Serial.print("  " BLD "Button  Protocol  Address   Command\r\n" RST);
   Serial.print(GRY "  ────────────────────────────────────\r\n" RST);
@@ -666,7 +701,7 @@ void SerialGames::_cfgShowConfig() {
 }
 
 void SerialGames::_cfgOnLine() {
-  // Lower-case
+  // Lower-case the input into a working buffer
   char buf[64];
   uint8_t len = 0;
   while (_line[len] && len < 63) { buf[len] = _line[len]; len++; }
@@ -688,27 +723,26 @@ void SerialGames::_cfgOnLine() {
 
   if (tc == 0) { Serial.print("  > "); return; }
 
-  // q / back
+  // ── q / back ───────────────────────────────────────────────
   if (strcmp(toks[0],"q")==0 || strcmp(toks[0],"back")==0) {
-    _st = St::MENU;
-    _lineMode = false;
-    _drawMenu();
+    _st = St::MENU; _lineMode = false; _drawMenu(); return;
+  }
+
+  // ── help ───────────────────────────────────────────────────
+  if (strcmp(toks[0],"help")==0) { _cfgDraw(); return; }
+
+  // ── show ───────────────────────────────────────────────────
+  if (strcmp(toks[0],"show")==0) { _cfgShowConfig(); return; }
+
+  // ── default ────────────────────────────────────────────────
+  if (strcmp(toks[0],"default")==0) {
+    g_cfg = BADGE_CONFIG_DEFAULT;
+    configSave();
+    Serial.print("  " GRN "Factory defaults restored and saved.\r\n" RST "\r\n  > ");
     return;
   }
 
-  // help
-  if (strcmp(toks[0],"help")==0) {
-    _cfgDraw();
-    return;
-  }
-
-  // show
-  if (strcmp(toks[0],"show")==0) {
-    _cfgShowConfig();
-    return;
-  }
-
-  // name <yourname>
+  // ── name <yourname> ────────────────────────────────────────
   if (strcmp(toks[0],"name")==0) {
     if (tc < 2) {
       Serial.print("  " RED "Usage: name <yourname>  (max 15 chars, no spaces)\r\n" RST "  > ");
@@ -716,7 +750,6 @@ void SerialGames::_cfgOnLine() {
     }
     strncpy(g_cfg.name, toks[1], NAME_MAX_LEN - 1);
     g_cfg.name[NAME_MAX_LEN - 1] = '\0';
-    // Uppercase: a-z and å/ä/ö/ü → Å/Ä/Ö/Ü (Latin-1 lowercase is +0x20 from uppercase)
     for (uint8_t i = 0; g_cfg.name[i]; i++) {
       uint8_t b = (uint8_t)g_cfg.name[i];
       if (b >= 'a' && b <= 'z')
@@ -729,28 +762,17 @@ void SerialGames::_cfgOnLine() {
     return;
   }
 
-  // default
-  if (strcmp(toks[0],"default")==0) {
-    g_cfg = BADGE_CONFIG_DEFAULT;
-    configSave();
-    Serial.print("  " GRN "Factory defaults restored and saved.\r\n" RST "\r\n  > ");
-    return;
-  }
-
-  // bright matrix|flash <1-8>
+  // ── bright matrix|flash <1-8> ──────────────────────────────
   if (strcmp(toks[0],"bright")==0 && tc >= 3) {
     uint8_t val = (uint8_t)atoi(toks[2]);
     if (val < 1 || val > 8) {
-      Serial.print("  " RED "Value must be 1-8.\r\n" RST "  > ");
-      return;
+      Serial.print("  " RED "Value must be 1-8.\r\n" RST "  > "); return;
     }
     if (strcmp(toks[1],"matrix")==0) {
-      g_cfg.brightness = val;
-      configSaveBrightness();
+      g_cfg.brightness = val; configSaveBrightness();
       Serial.printf("  " GRN "Matrix brightness set to %d.\r\n" RST "  > ", val);
     } else if (strcmp(toks[1],"flash")==0) {
-      g_cfg.flashBright = val;
-      configSaveFlash();
+      g_cfg.flashBright = val; configSaveFlash();
       Serial.printf("  " GRN "Flashlight brightness set to %d.\r\n" RST "  > ", val);
     } else {
       Serial.print("  " RED "Unknown target. Use 'matrix' or 'flash'.\r\n" RST "  > ");
@@ -758,27 +780,88 @@ void SerialGames::_cfgOnLine() {
     return;
   }
 
-  // ir <btn> <proto> <addr> <cmd>
+  // ── led <mode> ─────────────────────────────────────────────
+  if (strcmp(toks[0],"led")==0) {
+    if (tc < 2) {
+      Serial.print("  " RED "Usage: led <mode>  (knight pulse strobe alt chase on off)\r\n" RST "  > ");
+      return;
+    }
+    uint8_t anim = _cfgParseAnim(toks[1]);
+    if (anim == 0xFF) {
+      Serial.print("  " RED "Unknown mode. Choose: knight pulse strobe alt chase on off\r\n" RST "  > ");
+      return;
+    }
+    g_cfg.ledAnim = anim;
+    configSaveSettings();
+    Serial.printf("  " GRN "LED animation set to %s — saved.\r\n" RST "  > ", _animName(anim));
+    return;
+  }
+
+  // ── idle on|off  /  idle timeout <sec> ────────────────────
+  if (strcmp(toks[0],"idle")==0 && tc >= 2) {
+    if (strcmp(toks[1],"on")==0) {
+      g_cfg.idleEnable = 1; configSaveSettings();
+      Serial.print("  " GRN "Screensaver enabled — saved.\r\n" RST "  > ");
+    } else if (strcmp(toks[1],"off")==0) {
+      g_cfg.idleEnable = 0; configSaveSettings();
+      Serial.print("  " GRN "Screensaver disabled — saved.\r\n" RST "  > ");
+    } else if (strcmp(toks[1],"timeout")==0 && tc >= 3) {
+      uint8_t sec = (uint8_t)atoi(toks[2]);
+      if (sec < 5 || sec > 60) {
+        Serial.print("  " RED "Timeout must be 5-60 seconds.\r\n" RST "  > "); return;
+      }
+      g_cfg.idleTimeoutSec = sec; configSaveSettings();
+      Serial.printf("  " GRN "Idle timeout set to %d s — saved.\r\n" RST "  > ", sec);
+    } else {
+      Serial.print("  " RED "Usage: idle on  /  idle off  /  idle timeout <5-60>\r\n" RST "  > ");
+    }
+    return;
+  }
+
+  // ── scroll menu|idle|name <ms> ─────────────────────────────
+  if (strcmp(toks[0],"scroll")==0 && tc >= 3) {
+    int ms = atoi(toks[2]);
+    if (strcmp(toks[1],"menu")==0) {
+      if (ms < 20 || ms > 150) {
+        Serial.print("  " RED "Menu scroll must be 20-150 ms/pixel.\r\n" RST "  > "); return;
+      }
+      g_cfg.menuScrollMs = (uint8_t)ms; configSaveSettings();
+      Serial.printf("  " GRN "Menu scroll set to %d ms/px — saved.\r\n" RST "  > ", ms);
+    } else if (strcmp(toks[1],"idle")==0) {
+      if (ms < 10 || ms > 100) {
+        Serial.print("  " RED "Idle scroll must be 10-100 ms/pixel.\r\n" RST "  > "); return;
+      }
+      g_cfg.idleScrollMs = (uint8_t)ms; configSaveSettings();
+      Serial.printf("  " GRN "Idle scroll set to %d ms/px — saved.\r\n" RST "  > ", ms);
+    } else if (strcmp(toks[1],"name")==0) {
+      if (ms < 20 || ms > 150) {
+        Serial.print("  " RED "Name scroll must be 20-150 ms/pixel.\r\n" RST "  > "); return;
+      }
+      g_cfg.nameScrollMs = (uint8_t)ms; configSaveSettings();
+      Serial.printf("  " GRN "Name scroll set to %d ms/px — saved.\r\n" RST "  > ", ms);
+    } else {
+      Serial.print("  " RED "Usage: scroll menu|idle|name <ms>\r\n" RST "  > ");
+    }
+    return;
+  }
+
+  // ── ir <btn> <proto> <addr> <cmd> ──────────────────────────
   if (strcmp(toks[0],"ir")==0) {
     if (tc < 5) {
-      Serial.print("  " RED "Usage: ir <btn> <proto> <addr> <cmd>\r\n" RST "  > ");
-      return;
+      Serial.print("  " RED "Usage: ir <btn> <proto> <addr> <cmd>\r\n" RST "  > "); return;
     }
     uint8_t btn   = _cfgParseBtn(toks[1]);
     uint8_t proto = _cfgParseProto(toks[2]);
     if (btn == 0xFF) {
-      Serial.print("  " RED "Unknown button. Use A B UP DOWN LEFT RIGHT.\r\n" RST "  > ");
-      return;
+      Serial.print("  " RED "Unknown button. Use A B UP DOWN LEFT RIGHT.\r\n" RST "  > "); return;
     }
     if (proto == 0xFF) {
-      Serial.print("  " RED "Unknown protocol. Use NEC SAMSUNG SONY RC5.\r\n" RST "  > ");
-      return;
+      Serial.print("  " RED "Unknown protocol. Use NEC SAMSUNG SONY RC5.\r\n" RST "  > "); return;
     }
     uint32_t addr = (uint32_t)strtoul(toks[3], nullptr, 16);
     uint32_t cmd  = (uint32_t)strtoul(toks[4], nullptr, 16);
     if (addr > 0xFFFF || cmd > 0xFF) {
-      Serial.print("  " RED "Address must be ≤ 0xFFFF, command ≤ 0xFF.\r\n" RST "  > ");
-      return;
+      Serial.print("  " RED "Address must be ≤ 0xFFFF, command ≤ 0xFF.\r\n" RST "  > "); return;
     }
     g_cfg.ir[btn].protocol = proto;
     g_cfg.ir[btn].addr_lo  = (uint8_t)(addr & 0xFF);
