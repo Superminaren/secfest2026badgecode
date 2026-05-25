@@ -111,9 +111,38 @@ static const uint8_t FONT_4x7[96][FONT_H] = {
   /* 0x7F     */ {0,0,0,0,0,0,0},
 };
 
+// Extended Latin-1 glyphs: Å Ä Ö Ü (+ lowercase mapped to same shape).
+// Layout mirrors FONT_4x7: each row is 4 bits, bit3=leftmost col.
+//
+// Å: ring above → two top rows form arch + ring, rest is standard A
+// Ä: outer dots (#__#) atop A arch (_##_) — pattern alternates clearly
+// Ö: outer dots atop O arc, bottom arc closes the O
+// Ü: inner dots (_##_) atop U body — inner vs outer makes them distinct
+
+struct ExtGlyph { uint8_t code; uint8_t rows[FONT_H]; };
+static const ExtGlyph FONT_EXT[] = {
+  // Uppercase
+  { 0xC5 /* Å */, {0b0110, 0b0110, 0b1001, 0b1001, 0b1111, 0b1001, 0b1001} },
+  { 0xC4 /* Ä */, {0b1001, 0b0110, 0b1001, 0b1001, 0b1111, 0b1001, 0b1001} },
+  { 0xD6 /* Ö */, {0b1001, 0b0110, 0b1001, 0b1001, 0b1001, 0b1001, 0b0110} },
+  { 0xDC /* Ü */, {0b0110, 0b1001, 0b1001, 0b1001, 0b1001, 0b1001, 0b0110} },
+  // Lowercase — same shape as uppercase (matches the base font convention)
+  { 0xE5 /* å */, {0b0110, 0b0110, 0b1001, 0b1001, 0b1111, 0b1001, 0b1001} },
+  { 0xE4 /* ä */, {0b1001, 0b0110, 0b1001, 0b1001, 0b1111, 0b1001, 0b1001} },
+  { 0xF6 /* ö */, {0b1001, 0b0110, 0b1001, 0b1001, 0b1001, 0b1001, 0b0110} },
+  { 0xFC /* ü */, {0b0110, 0b1001, 0b1001, 0b1001, 0b1001, 0b1001, 0b0110} },
+};
+static const uint8_t FONT_EXT_COUNT = sizeof(FONT_EXT) / sizeof(FONT_EXT[0]);
+
 static inline uint8_t fontPixel(char c, int col, int row) {
   if (col < 0 || col >= FONT_W || row < 0 || row >= FONT_H) return 0;
   uint8_t idx = (uint8_t)c;
+  // Extended Latin-1 characters
+  for (uint8_t i = 0; i < FONT_EXT_COUNT; i++) {
+    if (idx == FONT_EXT[i].code) {
+      return (FONT_EXT[i].rows[row] >> (FONT_W - 1 - col)) & 1;
+    }
+  }
   if (idx < 0x20 || idx > 0x7F) return 0;
   uint8_t bits = FONT_4x7[idx - 0x20][row];
   return (bits >> (FONT_W - 1 - col)) & 1;

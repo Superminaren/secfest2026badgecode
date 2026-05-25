@@ -632,6 +632,7 @@ void SerialGames::_cfgDraw() {
     GRY
     "  Commands (case-insensitive):\r\n"
     "  " RST BLD "show" RST GRY "                     — print current settings\r\n"
+    "  " RST BLD "name <yourname>" RST GRY "          — set badge owner name (shown on matrix)\r\n"
     "  " RST BLD "bright matrix <1-8>" RST GRY "     — set matrix / LED animation depth\r\n"
     "  " RST BLD "bright flash <1-8>" RST GRY "      — set flashlight brightness\r\n"
     "  " RST BLD "ir <btn> <proto> <addr> <cmd>" RST GRY "\r\n"
@@ -648,6 +649,8 @@ void SerialGames::_cfgDraw() {
 
 void SerialGames::_cfgShowConfig() {
   Serial.print("\r\n");
+  Serial.printf("  Name              : " BLD "%s" RST "\r\n",
+                g_cfg.name[0] ? g_cfg.name : "(not set)");
   Serial.printf("  Matrix brightness : " BLD "%d" RST "/8\r\n", g_cfg.brightness);
   Serial.printf("  Flash brightness  : " BLD "%d" RST "/8\r\n", g_cfg.flashBright);
   Serial.print("\r\n");
@@ -702,6 +705,27 @@ void SerialGames::_cfgOnLine() {
   // show
   if (strcmp(toks[0],"show")==0) {
     _cfgShowConfig();
+    return;
+  }
+
+  // name <yourname>
+  if (strcmp(toks[0],"name")==0) {
+    if (tc < 2) {
+      Serial.print("  " RED "Usage: name <yourname>  (max 15 chars, no spaces)\r\n" RST "  > ");
+      return;
+    }
+    strncpy(g_cfg.name, toks[1], NAME_MAX_LEN - 1);
+    g_cfg.name[NAME_MAX_LEN - 1] = '\0';
+    // Uppercase: a-z and å/ä/ö/ü → Å/Ä/Ö/Ü (Latin-1 lowercase is +0x20 from uppercase)
+    for (uint8_t i = 0; g_cfg.name[i]; i++) {
+      uint8_t b = (uint8_t)g_cfg.name[i];
+      if (b >= 'a' && b <= 'z')
+        g_cfg.name[i] = (char)(b - 32);
+      else if (b == 0xE5 || b == 0xE4 || b == 0xF6 || b == 0xFC)
+        g_cfg.name[i] = (char)(b - 0x20);
+    }
+    configSaveName();
+    Serial.printf("  " GRN "Name set to: %s — saved.\r\n" RST "  > ", g_cfg.name);
     return;
   }
 

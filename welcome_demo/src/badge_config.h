@@ -14,10 +14,12 @@
 #include <Arduino.h>
 
 // ── EEPROM ──────────────────────────────────────────────────────
-#define EEPROM_CFG_SIZE      32
+#define EEPROM_CFG_SIZE      48
 #define EEPROM_ADDR_BRIGHT    0
 #define EEPROM_ADDR_FLASH     1
 #define EEPROM_ADDR_IR_BASE   2   // 4 bytes × 6 buttons = 24 bytes
+#define EEPROM_ADDR_NAME     26   // 16 bytes, null-terminated
+#define NAME_MAX_LEN         16   // 15 visible chars + null terminator
 
 // ── IR protocol IDs ─────────────────────────────────────────────
 #define IR_PROTO_NEC      0
@@ -46,6 +48,7 @@ struct BadgeConfig {
   uint8_t brightness;      // matrix + front LED depth, 1-8
   uint8_t flashBright;     // flashlight brightness, 1-8
   IrCode  ir[IR_BTN_COUNT];// per-button IR codes
+  char    name[NAME_MAX_LEN]; // owner name (null-terminated, uppercase)
 };
 
 // Default IR codes — Samsung TV (NEC-compatible)
@@ -60,7 +63,8 @@ static const BadgeConfig BADGE_CONFIG_DEFAULT = {
     { IR_PROTO_NEC, 0x07, 0x07, 0x10 }, // Down  → Channel Down
     { IR_PROTO_NEC, 0x07, 0x07, 0x0F }, // Left  → Mute
     { IR_PROTO_NEC, 0x07, 0x07, 0x02 }, // Right → Power
-  }
+  },
+  ""   // name (empty by default)
 };
 
 // ── Global config — defined in main.cpp ──────────────────────────
@@ -72,3 +76,4 @@ void configSave();
 void configSaveBrightness();
 void configSaveFlash();
 void configSaveIr(uint8_t btnIdx);
+void configSaveName();

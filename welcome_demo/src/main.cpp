@@ -52,6 +52,19 @@ void configLoad() {
       g_cfg.ir[i].command  = EEPROM.read(base + 3);
     }
   }
+  // Load name — accept printable ASCII plus Å Ä Ö Ü (0xC4/C5/D6/DC)
+  for (uint8_t i = 0; i < NAME_MAX_LEN; i++) {
+    uint8_t b = EEPROM.read(EEPROM_ADDR_NAME + i);
+    bool valid = (b >= 32 && b <= 126) ||
+                 b == 0xC4 || b == 0xC5 || b == 0xD6 || b == 0xDC;
+    if (valid) {
+      g_cfg.name[i] = (char)b;
+    } else {
+      g_cfg.name[i] = '\0';
+      break;
+    }
+  }
+  g_cfg.name[NAME_MAX_LEN - 1] = '\0';
 }
 
 void configSave() {
@@ -64,6 +77,14 @@ void configSave() {
     EEPROM.write(base + 2, g_cfg.ir[i].addr_hi);
     EEPROM.write(base + 3, g_cfg.ir[i].command);
   }
+  for (uint8_t i = 0; i < NAME_MAX_LEN; i++)
+    EEPROM.write(EEPROM_ADDR_NAME + i, (uint8_t)g_cfg.name[i]);
+  EEPROM.commit();
+}
+
+void configSaveName() {
+  for (uint8_t i = 0; i < NAME_MAX_LEN; i++)
+    EEPROM.write(EEPROM_ADDR_NAME + i, (uint8_t)g_cfg.name[i]);
   EEPROM.commit();
 }
 
@@ -232,6 +253,31 @@ static void frontSet(int idx, int state) {
 
 // ============================================================ text scroll ==
 
+// Source strings are UTF-8 (the .cpp file is UTF-8).  The font uses Latin-1
+// single-byte values.  This buffer holds the converted copy so the scroller
+// always sees one byte per glyph, including Å/Ä/Ö/Ü (U+00C4–U+00DC range).
+// 64 bytes covers every string we scroll; longer strings are silently clipped.
+#define SCROLLER_BUF_LEN 64
+static char scrollerBuf[SCROLLER_BUF_LEN];
+
+// Decode a UTF-8 string into a Latin-1 (ISO 8859-1) byte string.
+// Characters outside U+00FF are dropped.  Three/four-byte sequences skipped.
+static void utf8ToLatin1(char* dst, const char* src, uint8_t dstLen) {
+  uint8_t di = 0;
+  for (uint8_t si = 0; src[si] && di < dstLen - 1; si++) {
+    uint8_t b = (uint8_t)src[si];
+    if (b < 0x80) {
+      dst[di++] = (char)b;
+    } else if ((b & 0xE0) == 0xC0 && src[si + 1]) {
+      uint8_t cont = (uint8_t)src[++si];
+      uint16_t cp = ((uint16_t)(b & 0x1F) << 6) | (cont & 0x3F);
+      if (cp >= 0x20 && cp <= 0xFF) dst[di++] = (char)(uint8_t)cp;
+    }
+    // 3/4-byte sequences not needed — skip continuation bytes
+  }
+  dst[di] = '\0';
+}
+
 struct Scroller {
   const char* text;
   int  textPxWidth;   // glyph cols + 1-px gap per char, total
@@ -245,8 +291,9 @@ struct Scroller {
 static Scroller scroller;
 
 static void scrollStart(const char* t, unsigned long stepMs = 70, uint8_t b = 50) {
-  scroller.text = t;
-  scroller.textPxWidth = (int)strlen(t) * (FONT_W + 1);
+  utf8ToLatin1(scrollerBuf, t, SCROLLER_BUF_LEN);
+  scroller.text = scrollerBuf;
+  scroller.textPxWidth = (int)strlen(scrollerBuf) * (FONT_W + 1);
   scroller.pos = -W;      // start with text just off-screen right
   scroller.lastTick = 0;
   scroller.stepMs = stepMs;
@@ -900,13 +947,44 @@ static void irRemoteStep() {
 
 // ============================================================ menu =========
 
-const char* MENU_ITEMS[] = { "SNAKE", "SIMON", "WELCOME", "SETTINGS", "FLASHLIGHT", "IR REMOTE" };
-const int   MENU_LEN     = sizeof(MENU_ITEMS) / sizeof(MENU_ITEMS[0]);
-static int  menuIdx      = 0;
+const char* MENU_ITEMS[] = {
+  "SNAKE", "SIMON", "WELCOME", "SETTINGS", "FLASHLIGHT", "IR REMOTE", "NAME BADGE"
+};
+const int   MENU_LEN = sizeof(MENU_ITEMS) / sizeof(MENU_ITEMS[0]);
+static int  menuIdx  = 0;
+
+// Idle screensaver — shown after IDLE_TIMEOUT_MS of no button activity in menu
+#define IDLE_TIMEOUT_MS 8000
+static const char* const IDLE_MSGS[] = {
+  "HACK THE PLANET",
+  "CTRL ALT DEFEAT",
+  "0xDEADBEEF",
+  "ROOT ACCESS",
+  "PATCH YOUR STUFF",
+  "COFFEE POWERED",
+  "NO CLOUD PLS",
+  "RTFM",
+  "STAY PARANOID",
+  "GLENN GLENN GLENN",
+  "EJ I TRAFIK",
+  "FÖRSENINGAR PGA FÖRSENINGAR"
+};
+static const int IDLE_MSG_COUNT = sizeof(IDLE_MSGS) / sizeof(IDLE_MSGS[0]);
+
+static unsigned long menuLastActivity    = 0;
+static bool          menuIdle            = false;
+static uint8_t       menuIdleMsgIdx      = 0;
+static bool          menuIdlePausing     = false;
+static unsigned long menuIdlePauseUntil  = 0;
+
+#define IDLE_SCROLL_MS  45    // px/step for idle messages (faster than menu)
+#define IDLE_PAUSE_MS   1200  // blank gap between messages
 
 static void menuEnter() {
+  menuLastActivity   = millis();
+  menuIdle           = false;
+  menuIdlePausing    = false;
   scrollStart(MENU_ITEMS[menuIdx], 50, MATRIX_BRIGHTNESS);
-  // Front LEDs are driven by frontKnightRiderUpdate() — no static override here.
 }
 
 static void menuStep() {
@@ -920,10 +998,40 @@ static void menuStep() {
     menuEnter();
     return;
   }
-  // Re-render scroller continuously (loops via the "done" reset below)
+
+  // Any other button press wakes from idle without consuming the press
+  if (anyPressed() && menuIdle) {
+    menuIdle        = false;
+    menuIdlePausing = false;
+    menuLastActivity = millis();
+    scrollStart(MENU_ITEMS[menuIdx], 50, MATRIX_BRIGHTNESS);
+  }
+
+  // Enter idle if no activity for IDLE_TIMEOUT_MS
+  if (!menuIdle && (millis() - menuLastActivity) >= IDLE_TIMEOUT_MS) {
+    menuIdle        = true;
+    menuIdlePausing = false;
+    menuIdleMsgIdx  = (uint8_t)random(IDLE_MSG_COUNT);
+    scrollStart(IDLE_MSGS[menuIdleMsgIdx], IDLE_SCROLL_MS, MATRIX_BRIGHTNESS);
+  }
+
   scrollRenderTick();
   if (scroller.done) {
-    scrollStart(MENU_ITEMS[menuIdx], 90, MATRIX_BRIGHTNESS);
+    if (menuIdle) {
+      if (!menuIdlePausing) {
+        // Message just finished — begin blank pause
+        menuIdlePausing   = true;
+        menuIdlePauseUntil = millis() + IDLE_PAUSE_MS;
+        fbClear();
+      } else if (millis() >= menuIdlePauseUntil) {
+        // Pause over — start next message
+        menuIdlePausing = false;
+        menuIdleMsgIdx  = (menuIdleMsgIdx + 1) % IDLE_MSG_COUNT;
+        scrollStart(IDLE_MSGS[menuIdleMsgIdx], IDLE_SCROLL_MS, MATRIX_BRIGHTNESS);
+      }
+    } else {
+      scrollStart(MENU_ITEMS[menuIdx], 90, MATRIX_BRIGHTNESS);
+    }
   }
   fbPush();
 }
@@ -940,7 +1048,36 @@ enum AppState {
   ST_SETTINGS,
   ST_FLASHLIGHT,
   ST_IR_REMOTE,
+  ST_NAME_BADGE,
 };
+
+// ============================================================ name badge ====
+//
+// Scrolls the owner's name (set via serial CONFIG → name command) on the
+// matrix in a continuous loop.  B exits back to the menu.
+
+struct NameBadgeState {
+  bool exitRequested;
+};
+static NameBadgeState nameBadgeCtx;
+
+static void nameBadgeReset() {
+  nameBadgeCtx.exitRequested = false;
+  const char* txt = (g_cfg.name[0] != '\0') ? g_cfg.name : "SET YOUR NAME";
+  scrollStart(txt, 70, MATRIX_BRIGHTNESS);
+}
+
+static void nameBadgeStep() {
+  if (input.pressed[BI_B]) { nameBadgeCtx.exitRequested = true; return; }
+  scrollRenderTick();
+  if (scroller.done) {
+    const char* txt = (g_cfg.name[0] != '\0') ? g_cfg.name : "SET YOUR NAME";
+    scrollStart(txt, 70, MATRIX_BRIGHTNESS);
+  }
+  fbPush();
+}
+
+// ============================================================ state mach. ==
 
 static AppState appState = ST_BOOT_SWEEP;
 static unsigned long stateEnter = 0;
@@ -959,6 +1096,7 @@ static void enterState(AppState s) {
     case ST_SETTINGS:       settingsReset(); break;
     case ST_FLASHLIGHT:     flashReset(); break;
     case ST_IR_REMOTE:      irRemoteReset(); break;
+    case ST_NAME_BADGE:     nameBadgeReset(); break;
     default: break;
   }
 }
@@ -1133,6 +1271,7 @@ void loop() {
           case 3: enterState(ST_SETTINGS);       break;
           case 4: enterState(ST_FLASHLIGHT);     break;
           case 5: enterState(ST_IR_REMOTE);      break;
+          case 6: enterState(ST_NAME_BADGE);     break;
         }
       }
       break;
@@ -1165,6 +1304,12 @@ void loop() {
     case ST_IR_REMOTE: {
       irRemoteStep();
       if (irExitRequested) enterState(ST_MENU);
+      break;
+    }
+
+    case ST_NAME_BADGE: {
+      nameBadgeStep();
+      if (nameBadgeCtx.exitRequested) enterState(ST_MENU);
       break;
     }
   }
