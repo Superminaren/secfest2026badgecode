@@ -66,6 +66,19 @@ void configLoad() {
   }
   g_cfg.name[NAME_MAX_LEN - 1] = '\0';
 
+  // If no name is stored in EEPROM, fall back to the compile-time default
+  // (supplied via ./flash.sh "NAME") and immediately persist it so future
+  // reflashes without a name argument still display the stored name.
+#ifdef BADGE_DEFAULT_NAME
+  if (g_cfg.name[0] == '\0') {
+    strncpy(g_cfg.name, BADGE_DEFAULT_NAME, NAME_MAX_LEN - 1);
+    g_cfg.name[NAME_MAX_LEN - 1] = '\0';
+    for (uint8_t i = 0; i < NAME_MAX_LEN; i++)
+      EEPROM.write(EEPROM_ADDR_NAME + i, (uint8_t)g_cfg.name[i]);
+    EEPROM.commit();
+  }
+#endif
+
   // Load new settings fields — validate each, fall back to default if uninitialised
   uint8_t ledAnim = EEPROM.read(EEPROM_ADDR_LED_ANIM);
   g_cfg.ledAnim = (ledAnim < LED_ANIM_COUNT) ? ledAnim : BADGE_CONFIG_DEFAULT.ledAnim;
@@ -980,6 +993,37 @@ static void irRemoteStep() {
   irRemoteDrawIcon();
 }
 
+// ============================================================ welcome msgs ==
+//
+// One of these is chosen at random each boot for the ST_WELCOME_SCROLL state.
+// Add or remove entries freely — the count is derived automatically.
+
+// Messages containing "%s" are personalised — the badge owner's name is
+// substituted at runtime.  They are skipped silently when no name is stored.
+// Add new personalised lines here by including "%s" anywhere in the string.
+static const char* const WELCOME_MSGS[] = {
+  "WELCOME, %s TO SF 2026!"
+};
+static const int WELCOME_MSG_COUNT = sizeof(WELCOME_MSGS) / sizeof(WELCOME_MSGS[0]);
+
+// Expansion buffer — sized for the longest personalised template plus a full name.
+static char welcomeNameBuf[40];
+
+// Pick a welcome message.  If the chosen entry contains "%s" and a name is
+// stored, the name is substituted and the result returned from welcomeNameBuf.
+// Entries that need a name are retried (up to 5 attempts) when no name is set,
+// so the pool degrades gracefully for unnamed badges.
+static const char* pickWelcomeMsg() {
+  for (int attempt = 0; attempt < 5; attempt++) {
+    const char* msg = WELCOME_MSGS[random(WELCOME_MSG_COUNT)];
+    if (strstr(msg, "%s") == nullptr) return msg;        // no substitution needed
+    if (g_cfg.name[0] == '\0')        continue;          // skip — no name available
+    snprintf(welcomeNameBuf, sizeof(welcomeNameBuf), msg, g_cfg.name);
+    return welcomeNameBuf;
+  }
+  return WELCOME_MSGS[0];  // safe fallback (always a plain string)
+}
+
 // ============================================================ menu =========
 
 const char* MENU_ITEMS[] = {
@@ -1001,7 +1045,8 @@ static const char* const IDLE_MSGS[] = {
   "STAY PARANOID",
   "GLENN GLENN GLENN",
   "EJ I TRAFIK",
-  "FÖRSENINGAR PGA FÖRSENINGAR"
+  "FÖRSENINGAR PGA FÖRSENINGAR",
+  "IM EMIL THERE WILL SOON BE A POLICY"
 };
 static const int IDLE_MSG_COUNT = sizeof(IDLE_MSGS) / sizeof(IDLE_MSGS[0]);
 
@@ -1120,7 +1165,7 @@ static void enterState(AppState s) {
   fbClear(); fbPush();
   frontAll(FRONT_LED_OFF);
   switch (s) {
-    case ST_WELCOME_SCROLL: scrollStart("WELCOME TO SECURITY FEST 2026", 50, MATRIX_BRIGHTNESS); break;
+    case ST_WELCOME_SCROLL: scrollStart(pickWelcomeMsg(), 50, MATRIX_BRIGHTNESS); break;
     case ST_FIREWORKS:      fwInit(); break;
     case ST_MENU:           menuEnter(); break;
     case ST_SNAKE:          snakeReset(); break;
