@@ -1002,7 +1002,9 @@ static void irRemoteStep() {
 // substituted at runtime.  They are skipped silently when no name is stored.
 // Add new personalised lines here by including "%s" anywhere in the string.
 static const char* const WELCOME_MSGS[] = {
-  "WELCOME, %s TO SF 2026!"
+  "WELCOME, %s TO SF 2026!",
+  "PAPPA BETALAR!",
+  "POKEMON ÄR BÄST!"
 };
 static const int WELCOME_MSG_COUNT = sizeof(WELCOME_MSGS) / sizeof(WELCOME_MSGS[0]);
 
@@ -1201,6 +1203,7 @@ static void saoUpdate() {
   int   duty = (int)((s + 1.0f) * 500.0f);     // 0 .. 1000
   duty = (duty>500)*1000;
   analogWrite(SAO_GP1, duty);
+  analogWrite(SAO_GP2, ((s+1)/2.0)*1000);
 }
 
 // ============================================================ front LED animations =====
