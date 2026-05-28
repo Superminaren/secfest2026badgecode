@@ -97,6 +97,9 @@ void configLoad() {
 
   uint8_t nScroll = EEPROM.read(EEPROM_ADDR_NAME_SCROLL);
   g_cfg.nameScrollMs = (nScroll >= 20 && nScroll <= 150) ? nScroll : BADGE_CONFIG_DEFAULT.nameScrollMs;
+
+  uint8_t mAnim = EEPROM.read(EEPROM_ADDR_MATRIX_ANIM);
+  g_cfg.matrixAnim = (mAnim < MATRIX_ANIM_COUNT) ? mAnim : BADGE_CONFIG_DEFAULT.matrixAnim;
 }
 
 void configSave() {
@@ -117,6 +120,7 @@ void configSave() {
   EEPROM.write(EEPROM_ADDR_MENU_SCROLL,  g_cfg.menuScrollMs);
   EEPROM.write(EEPROM_ADDR_IDLE_SCROLL,  g_cfg.idleScrollMs);
   EEPROM.write(EEPROM_ADDR_NAME_SCROLL,  g_cfg.nameScrollMs);
+  EEPROM.write(EEPROM_ADDR_MATRIX_ANIM,  g_cfg.matrixAnim);
   EEPROM.commit();
 }
 
@@ -133,6 +137,7 @@ void configSaveSettings() {
   EEPROM.write(EEPROM_ADDR_MENU_SCROLL,  g_cfg.menuScrollMs);
   EEPROM.write(EEPROM_ADDR_IDLE_SCROLL,  g_cfg.idleScrollMs);
   EEPROM.write(EEPROM_ADDR_NAME_SCROLL,  g_cfg.nameScrollMs);
+  EEPROM.write(EEPROM_ADDR_MATRIX_ANIM,  g_cfg.matrixAnim);
   EEPROM.commit();
 }
 
@@ -466,6 +471,105 @@ static void fwStep() {
     fbOr(x, y, b);
   }
   fbPush();
+}
+
+// ============================================================ matrix anims ==
+//
+// Visual idle animations for the screensaver and the Animations menu.
+// Each *Step function writes directly to fb and calls fbPush.
+// MATRIX_ANIM_SCROLL uses the existing text scroller — handled by the caller.
+// matrixAnimReset() clears per-animation buffers when switching modes.
+
+static uint8_t s_twinkle[H][W];
+static uint8_t s_rain[H][W];
+static unsigned long s_rainLast = 0;
+
+static void matrixAnimReset() {
+  memset(s_twinkle, 0, sizeof(s_twinkle));
+  memset(s_rain,    0, sizeof(s_rain));
+  s_rainLast = 0;
+}
+
+// WAVE — a sine wave scrolling horizontally across all nine rows
+static void matrixWaveStep() {
+  fbClear();
+  float t = (float)millis() / 300.0f;
+  for (int x = 0; x < W; x++) {
+    float s = sinf((float)x * 0.8f - t);
+    int   cy = 4 + (int)(s * 3.5f);
+    cy = constrain(cy, 0, H - 1);
+    fbSet(x, cy,     255);
+    if (cy > 0)     fbSet(x, cy - 1, 80);
+    if (cy < H - 1) fbSet(x, cy + 1, 80);
+  }
+  fbPush();
+}
+
+// TWINKLE — random pixels flare up and fade independently
+static void matrixTwinkleStep() {
+  for (int y = 0; y < H; y++)
+    for (int x = 0; x < W; x++)
+      s_twinkle[y][x] = s_twinkle[y][x] > 20 ? s_twinkle[y][x] - 20 : 0;
+  for (int n = 0; n < 3; n++)
+    if (random(4) == 0)
+      s_twinkle[random(H)][random(W)] = 255;
+  for (int y = 0; y < H; y++)
+    for (int x = 0; x < W; x++)
+      fbSet(x, y, s_twinkle[y][x]);
+  fbPush();
+}
+
+// RAIN — bright pixels spawn at the top and fall, fading as they descend
+static void matrixRainStep() {
+  unsigned long now = millis();
+  if (now - s_rainLast >= 80) {
+    s_rainLast = now;
+    for (int y = H - 1; y > 0; y--)
+      for (int x = 0; x < W; x++)
+        s_rain[y][x] = s_rain[y - 1][x] > 50 ? s_rain[y - 1][x] - 50 : 0;
+    for (int x = 0; x < W; x++)
+      s_rain[0][x] = (random(4) == 0) ? 255 : 0;
+  }
+  for (int y = 0; y < H; y++)
+    for (int x = 0; x < W; x++)
+      fbSet(x, y, s_rain[y][x]);
+  fbPush();
+}
+
+// PULSE — whole screen breathes in and out together
+static void matrixPulseStep() {
+  float   t = (float)millis() / 800.0f * 2.0f * 3.14159265f;
+  uint8_t b = (uint8_t)((sinf(t) + 1.0f) * 0.5f * 255.0f);
+  for (int y = 0; y < H; y++)
+    for (int x = 0; x < W; x++)
+      fbSet(x, y, b);
+  fbPush();
+}
+
+// PLASMA — interference pattern of three overlapping sine waves
+static void matrixPlasmaStep() {
+  float t = (float)millis() / 600.0f;
+  for (int y = 0; y < H; y++) {
+    for (int x = 0; x < W; x++) {
+      float v = sinf(x * 1.1f + t)
+              + sinf(y * 0.9f + t * 0.7f)
+              + sinf((x + y) * 0.5f + t * 1.3f);
+      fbSet(x, y, (uint8_t)((v / 3.0f + 1.0f) * 0.5f * 255.0f));
+    }
+  }
+  fbPush();
+}
+
+// Dispatch to the correct animation based on g_cfg.matrixAnim.
+static void matrixAnimStep() {
+  switch (g_cfg.matrixAnim) {
+    case MATRIX_ANIM_WAVE:    matrixWaveStep();    break;
+    case MATRIX_ANIM_TWINKLE: matrixTwinkleStep(); break;
+    case MATRIX_ANIM_RAIN:    matrixRainStep();    break;
+    case MATRIX_ANIM_PULSE:   matrixPulseStep();   break;
+    case MATRIX_ANIM_PLASMA:  matrixPlasmaStep();  break;
+    default: break;
+  }
 }
 
 // ============================================================ snake ========
@@ -810,21 +914,24 @@ static void settingsStep() {
   }
   if (changed) { g_brightness = settingsCtx.brightness; configSaveBrightness(); }
 
-  // — Draw brightness bar ——————————————————————————————
-  // Rows 3-5: filled bar, 1 column per level (1..8 → cols 0..7).
-  // Row 1 / row 7: bright tick at the current-level column as a cursor.
-  // fbSet guard silently skips diagonal pixels (e.g. col 3 on row 3).
+  // — Draw brightness display ———————————————————————————
+  // Rows 2-6: full-width bar at pixel value 255.  Because fbPush scales every
+  // pixel by g_brightness/8, the bar itself gets brighter/dimmer as you adjust
+  // — the display IS the preview of the selected brightness.
+  // Rows 0 and 8: eight small tick marks (cols 0-7) showing the current level;
+  // the active tick is full-bright, the rest are dim so the position is clear.
   fbClear();
-  uint8_t barBright = 180;
-  for (int x = 0; x < settingsCtx.brightness; x++) {
-    fbSet(x, 3, barBright);
-    fbSet(x, 4, barBright);
-    fbSet(x, 5, barBright);
+  for (int x = 0; x < W; x++) {
+    fbSet(x, 2, 255); fbSet(x, 3, 255);
+    fbSet(x, 4, 255);
+    fbSet(x, 5, 255); fbSet(x, 6, 255);
   }
-  // Bright tick marks above and below the active column
-  int edge = settingsCtx.brightness - 1;
-  fbSet(edge, 1, 255);
-  fbSet(edge, 7, 255);
+  int cur = settingsCtx.brightness - 1;   // 0..7
+  for (int x = 0; x < 8; x++) {
+    uint8_t tick = (x == cur) ? 255 : 40;
+    fbSet(x, 0, tick);
+    fbSet(x, 8, tick);
+  }
   fbPush();
 }
 
@@ -1029,7 +1136,7 @@ static const char* pickWelcomeMsg() {
 // ============================================================ menu =========
 
 const char* MENU_ITEMS[] = {
-  "SNAKE", "SIMON", "WELCOME", "SETTINGS", "FLASHLIGHT", "IR REMOTE", "NAME BADGE"
+  "SNAKE", "SIMON", "WELCOME", "ANIMATIONS", "SETTINGS", "FLASHLIGHT", "IR REMOTE", "NAME BADGE"
 };
 const int   MENU_LEN = sizeof(MENU_ITEMS) / sizeof(MENU_ITEMS[0]);
 static int  menuIdx  = 0;
@@ -1092,27 +1199,36 @@ static void menuStep() {
   if (g_cfg.idleEnable && !menuIdle && (millis() - menuLastActivity) >= idleMs) {
     menuIdle        = true;
     menuIdlePausing = false;
-    menuIdleMsgIdx  = (uint8_t)random(IDLE_MSG_COUNT);
-    scrollStart(IDLE_MSGS[menuIdleMsgIdx], g_cfg.idleScrollMs, MATRIX_BRIGHTNESS);
-  }
-
-  scrollRenderTick();
-  if (scroller.done) {
-    if (menuIdle) {
-      if (!menuIdlePausing) {
-        menuIdlePausing    = true;
-        menuIdlePauseUntil = millis() + IDLE_PAUSE_MS;
-        fbClear();
-      } else if (millis() >= menuIdlePauseUntil) {
-        menuIdlePausing = false;
-        menuIdleMsgIdx  = (menuIdleMsgIdx + 1) % IDLE_MSG_COUNT;
-        scrollStart(IDLE_MSGS[menuIdleMsgIdx], g_cfg.idleScrollMs, MATRIX_BRIGHTNESS);
-      }
+    if (g_cfg.matrixAnim == MATRIX_ANIM_SCROLL) {
+      menuIdleMsgIdx = (uint8_t)random(IDLE_MSG_COUNT);
+      scrollStart(IDLE_MSGS[menuIdleMsgIdx], g_cfg.idleScrollMs, MATRIX_BRIGHTNESS);
     } else {
-      scrollStart(MENU_ITEMS[menuIdx], g_cfg.menuScrollMs, MATRIX_BRIGHTNESS);
+      matrixAnimReset();
     }
   }
-  fbPush();
+
+  // Render idle animation or menu text scroller
+  if (menuIdle && g_cfg.matrixAnim != MATRIX_ANIM_SCROLL) {
+    matrixAnimStep();
+  } else {
+    scrollRenderTick();
+    if (scroller.done) {
+      if (menuIdle) {
+        if (!menuIdlePausing) {
+          menuIdlePausing    = true;
+          menuIdlePauseUntil = millis() + IDLE_PAUSE_MS;
+          fbClear();
+        } else if (millis() >= menuIdlePauseUntil) {
+          menuIdlePausing = false;
+          menuIdleMsgIdx  = (menuIdleMsgIdx + 1) % IDLE_MSG_COUNT;
+          scrollStart(IDLE_MSGS[menuIdleMsgIdx], g_cfg.idleScrollMs, MATRIX_BRIGHTNESS);
+        }
+      } else {
+        scrollStart(MENU_ITEMS[menuIdx], g_cfg.menuScrollMs, MATRIX_BRIGHTNESS);
+      }
+    }
+    fbPush();
+  }
 }
 
 // ============================================================ state mach. ==
@@ -1124,6 +1240,7 @@ enum AppState {
   ST_MENU,
   ST_SNAKE,
   ST_SIMON,
+  ST_ANIMATIONS,
   ST_SETTINGS,
   ST_FLASHLIGHT,
   ST_IR_REMOTE,
@@ -1156,6 +1273,70 @@ static void nameBadgeStep() {
   fbPush();
 }
 
+// ============================================================ animations ====
+//
+// Lets the user cycle through all MATRIX_ANIM_* modes and preview them live.
+//   LEFT / RIGHT (or UP / DOWN) — cycle through animations
+//   A  — save the current selection as the idle animation and exit
+//   B  — exit without saving (restores the previous setting)
+
+struct AnimCtx {
+  uint8_t origAnim;      // value on entry, restored on B-cancel
+  bool    exitRequested;
+};
+static AnimCtx animCtx;
+
+static void animationsReset() {
+  animCtx.origAnim      = g_cfg.matrixAnim;
+  animCtx.exitRequested = false;
+  matrixAnimReset();
+  if (g_cfg.matrixAnim == MATRIX_ANIM_SCROLL) {
+    menuIdleMsgIdx = (uint8_t)random(IDLE_MSG_COUNT);
+    scrollStart(IDLE_MSGS[menuIdleMsgIdx], g_cfg.idleScrollMs, MATRIX_BRIGHTNESS);
+  }
+}
+
+static void animationsStep() {
+  if (input.pressed[BI_B]) {
+    g_cfg.matrixAnim = animCtx.origAnim;   // cancel — restore original
+    animCtx.exitRequested = true;
+    return;
+  }
+  if (input.pressed[BI_A]) {
+    configSaveSettings();                  // commit preview as idle animation
+    animCtx.exitRequested = true;
+    return;
+  }
+
+  bool changed = false;
+  if (input.pressed[BI_RIGHT] || input.pressed[BI_DOWN]) {
+    g_cfg.matrixAnim = (g_cfg.matrixAnim + 1) % MATRIX_ANIM_COUNT;
+    changed = true;
+  }
+  if (input.pressed[BI_LEFT] || input.pressed[BI_UP]) {
+    g_cfg.matrixAnim = (g_cfg.matrixAnim + MATRIX_ANIM_COUNT - 1) % MATRIX_ANIM_COUNT;
+    changed = true;
+  }
+  if (changed) {
+    matrixAnimReset();
+    if (g_cfg.matrixAnim == MATRIX_ANIM_SCROLL) {
+      menuIdleMsgIdx = (uint8_t)random(IDLE_MSG_COUNT);
+      scrollStart(IDLE_MSGS[menuIdleMsgIdx], g_cfg.idleScrollMs, MATRIX_BRIGHTNESS);
+    }
+  }
+
+  if (g_cfg.matrixAnim == MATRIX_ANIM_SCROLL) {
+    scrollRenderTick();
+    if (scroller.done) {
+      menuIdleMsgIdx = (menuIdleMsgIdx + 1) % IDLE_MSG_COUNT;
+      scrollStart(IDLE_MSGS[menuIdleMsgIdx], g_cfg.idleScrollMs, MATRIX_BRIGHTNESS);
+    }
+    fbPush();
+  } else {
+    matrixAnimStep();
+  }
+}
+
 // ============================================================ state mach. ==
 
 static AppState appState = ST_BOOT_SWEEP;
@@ -1172,6 +1353,7 @@ static void enterState(AppState s) {
     case ST_MENU:           menuEnter(); break;
     case ST_SNAKE:          snakeReset(); break;
     case ST_SIMON:          simonReset(); break;
+    case ST_ANIMATIONS:     animationsReset(); break;
     case ST_SETTINGS:       settingsReset(); break;
     case ST_FLASHLIGHT:     flashReset(); break;
     case ST_IR_REMOTE:      irRemoteReset(); break;
@@ -1387,10 +1569,11 @@ void loop() {
           case 0: enterState(ST_SNAKE);          break;
           case 1: enterState(ST_SIMON);          break;
           case 2: enterState(ST_WELCOME_SCROLL); break;
-          case 3: enterState(ST_SETTINGS);       break;
-          case 4: enterState(ST_FLASHLIGHT);     break;
-          case 5: enterState(ST_IR_REMOTE);      break;
-          case 6: enterState(ST_NAME_BADGE);     break;
+          case 3: enterState(ST_ANIMATIONS);     break;
+          case 4: enterState(ST_SETTINGS);       break;
+          case 5: enterState(ST_FLASHLIGHT);     break;
+          case 6: enterState(ST_IR_REMOTE);      break;
+          case 7: enterState(ST_NAME_BADGE);     break;
         }
       }
       break;
@@ -1405,6 +1588,12 @@ void loop() {
     case ST_SIMON: {
       simonStep();
       if (simon.exitRequested) enterState(ST_MENU);
+      break;
+    }
+
+    case ST_ANIMATIONS: {
+      animationsStep();
+      if (animCtx.exitRequested) enterState(ST_MENU);
       break;
     }
 

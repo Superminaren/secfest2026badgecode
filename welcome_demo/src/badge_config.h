@@ -16,6 +16,7 @@
 //   Byte  45   : menu scroll speed ms/pixel (20-150)
 //   Byte  46   : idle message scroll speed ms/pixel (10-100)
 //   Byte  47   : name badge scroll speed ms/pixel (20-150)
+//   Byte  48   : matrix idle animation mode (MATRIX_ANIM_*)
 // ================================================================
 #pragma once
 #include <Arduino.h>
@@ -33,6 +34,16 @@
 #define EEPROM_ADDR_MENU_SCROLL  45
 #define EEPROM_ADDR_IDLE_SCROLL  46
 #define EEPROM_ADDR_NAME_SCROLL  47
+#define EEPROM_ADDR_MATRIX_ANIM  48
+
+// ── Matrix idle animation modes ──────────────────────────────────
+#define MATRIX_ANIM_SCROLL   0  // scrolling hacker messages (default)
+#define MATRIX_ANIM_WAVE     1  // sine wave sweeping across the screen
+#define MATRIX_ANIM_TWINKLE  2  // random pixels flaring and fading
+#define MATRIX_ANIM_RAIN     3  // pixels falling from the top
+#define MATRIX_ANIM_PULSE    4  // whole screen breathing in and out
+#define MATRIX_ANIM_PLASMA   5  // interference pattern of three sine waves
+#define MATRIX_ANIM_COUNT    6
 
 // ── IR protocol IDs ─────────────────────────────────────────────
 #define IR_PROTO_NEC      0
@@ -78,6 +89,7 @@ struct BadgeConfig {
   uint8_t menuScrollMs;       // menu item scroll speed ms/pixel (20-150)
   uint8_t idleScrollMs;       // idle message scroll speed ms/pixel (10-100)
   uint8_t nameScrollMs;       // name-badge scroll speed ms/pixel (20-150)
+  uint8_t matrixAnim;         // MATRIX_ANIM_* idle matrix animation
 };
 
 // Default IR codes — Samsung TV (NEC-compatible)
@@ -100,6 +112,7 @@ static const BadgeConfig BADGE_CONFIG_DEFAULT = {
   90,                // menuScrollMs
   45,                // idleScrollMs
   70,                // nameScrollMs
+  MATRIX_ANIM_SCROLL, // matrixAnim
 };
 
 // ── Global config — defined in main.cpp ──────────────────────────
