@@ -668,6 +668,8 @@ void SerialGames::_cfgDraw() {
     "  " RST BLD "scroll name <20-150>" RST GRY "       — name-badge scroll speed (ms/pixel)\r\n"
     "  " RST BLD "ir <btn> <proto> <addr> <cmd>" RST GRY "\r\n"
     "      btn=A/B/UP/DOWN/LEFT/RIGHT  proto=NEC/SAMSUNG/SONY/RC5\r\n"
+    "  " RST BLD "havoc codes power|input|all" RST GRY " — which code types IR HAVOC transmits\r\n"
+    "  " RST BLD "havoc delay <100-2000>" RST GRY "     — ms between IR HAVOC sends\r\n"
     "  " RST BLD "default" RST GRY "                    — restore factory defaults\r\n"
     "  " RST BLD "q / back" RST GRY "                  — return to main menu\r\n"
     RST "\r\n"
@@ -688,6 +690,14 @@ void SerialGames::_cfgShowConfig() {
   Serial.printf("  Scroll  menu      : " BLD "%d" RST " ms/px\r\n", g_cfg.menuScrollMs);
   Serial.printf("  Scroll  idle      : " BLD "%d" RST " ms/px\r\n", g_cfg.idleScrollMs);
   Serial.printf("  Scroll  name      : " BLD "%d" RST " ms/px\r\n", g_cfg.nameScrollMs);
+  Serial.print("\r\n");
+  const char* havocCodesStr =
+    (g_cfg.havocCodes == HAVOC_SEND_ALL)   ? "power + input" :
+    (g_cfg.havocCodes & HAVOC_SEND_POWER)  ? "power only"    :
+    (g_cfg.havocCodes & HAVOC_SEND_INPUT)  ? "input only"    : "none";
+  Serial.printf("  IR havoc codes    : " BLD "%s" RST "\r\n", havocCodesStr);
+  Serial.printf("  IR havoc delay    : " BLD "%d" RST " ms\r\n",
+                (int)g_cfg.havocDelay * 100);
   Serial.print("\r\n");
   Serial.print("  " BLD "Button  Protocol  Address   Command\r\n" RST);
   Serial.print(GRY "  ────────────────────────────────────\r\n" RST);
@@ -870,6 +880,36 @@ void SerialGames::_cfgOnLine() {
     configSaveIr(btn);
     Serial.printf("  " GRN "%s → %s addr=0x%04lX cmd=0x%02lX — saved.\r\n" RST "  > ",
       _btnName(btn), _protoName(proto), addr, cmd);
+    return;
+  }
+
+  // ── havoc codes power|input|all  /  havoc delay <ms> ──────
+  if (strcmp(toks[0],"havoc")==0 && tc >= 2) {
+    if (strcmp(toks[1],"codes")==0 && tc >= 3) {
+      uint8_t mask = 0;
+      if (strcmp(toks[2],"power")==0) mask = HAVOC_SEND_POWER;
+      else if (strcmp(toks[2],"input")==0) mask = HAVOC_SEND_INPUT;
+      else if (strcmp(toks[2],"all")==0)   mask = HAVOC_SEND_ALL;
+      else {
+        Serial.print("  " RED "Usage: havoc codes power|input|all\r\n" RST "  > ");
+        return;
+      }
+      g_cfg.havocCodes = mask;
+      configSaveSettings();
+      Serial.printf("  " GRN "Havoc code types set to: %s — saved.\r\n" RST "  > ",
+        (mask == HAVOC_SEND_ALL) ? "power + input" :
+        (mask & HAVOC_SEND_POWER) ? "power only" : "input only");
+    } else if (strcmp(toks[1],"delay")==0 && tc >= 3) {
+      int ms = atoi(toks[2]);
+      if (ms < 100 || ms > 2000) {
+        Serial.print("  " RED "Delay must be 100-2000 ms.\r\n" RST "  > "); return;
+      }
+      g_cfg.havocDelay = (uint8_t)(ms / 100);
+      configSaveSettings();
+      Serial.printf("  " GRN "Havoc delay set to %d ms — saved.\r\n" RST "  > ", ms);
+    } else {
+      Serial.print("  " RED "Usage: havoc codes power|input|all  |  havoc delay <100-2000>\r\n" RST "  > ");
+    }
     return;
   }
 

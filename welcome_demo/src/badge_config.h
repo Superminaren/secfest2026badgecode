@@ -17,6 +17,8 @@
 //   Byte  46   : idle message scroll speed ms/pixel (10-100)
 //   Byte  47   : name badge scroll speed ms/pixel (20-150)
 //   Byte  48   : matrix idle animation mode (MATRIX_ANIM_*)
+//   Byte  49   : IR havoc code-type bitmask (HAVOC_SEND_*)
+//   Byte  50   : IR havoc send interval (×100 ms, 1-20)
 // ================================================================
 #pragma once
 #include <Arduino.h>
@@ -35,6 +37,13 @@
 #define EEPROM_ADDR_IDLE_SCROLL  46
 #define EEPROM_ADDR_NAME_SCROLL  47
 #define EEPROM_ADDR_MATRIX_ANIM  48
+#define EEPROM_ADDR_HAVOC_CODES  49
+#define EEPROM_ADDR_HAVOC_DELAY  50
+
+// ── IR havoc bitmask ─────────────────────────────────────────────
+#define HAVOC_SEND_POWER  0x01   // transmit power-toggle codes
+#define HAVOC_SEND_INPUT  0x02   // transmit source/input codes
+#define HAVOC_SEND_ALL    0x03
 
 // ── Matrix idle animation modes ──────────────────────────────────
 #define MATRIX_ANIM_SCROLL   0  // scrolling hacker messages (default)
@@ -90,6 +99,8 @@ struct BadgeConfig {
   uint8_t idleScrollMs;       // idle message scroll speed ms/pixel (10-100)
   uint8_t nameScrollMs;       // name-badge scroll speed ms/pixel (20-150)
   uint8_t matrixAnim;         // MATRIX_ANIM_* idle matrix animation
+  uint8_t havocCodes;         // HAVOC_SEND_* bitmask — which code types to blast
+  uint8_t havocDelay;         // send interval in ×100 ms (1-20 → 100 ms – 2 s)
 };
 
 // Default IR codes — Samsung TV (NEC-compatible)
@@ -113,6 +124,8 @@ static const BadgeConfig BADGE_CONFIG_DEFAULT = {
   45,                // idleScrollMs
   70,                // nameScrollMs
   MATRIX_ANIM_SCROLL, // matrixAnim
+  HAVOC_SEND_ALL,     // havocCodes  — blast both power and input by default
+  5,                  // havocDelay  — 500 ms between sends
 };
 
 // ── Global config — defined in main.cpp ──────────────────────────

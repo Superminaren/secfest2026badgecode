@@ -100,6 +100,12 @@ void configLoad() {
 
   uint8_t mAnim = EEPROM.read(EEPROM_ADDR_MATRIX_ANIM);
   g_cfg.matrixAnim = (mAnim < MATRIX_ANIM_COUNT) ? mAnim : BADGE_CONFIG_DEFAULT.matrixAnim;
+
+  uint8_t hCode = EEPROM.read(EEPROM_ADDR_HAVOC_CODES);
+  g_cfg.havocCodes = (hCode & HAVOC_SEND_ALL) ? hCode : BADGE_CONFIG_DEFAULT.havocCodes;
+
+  uint8_t hDly = EEPROM.read(EEPROM_ADDR_HAVOC_DELAY);
+  g_cfg.havocDelay = (hDly >= 1 && hDly <= 20) ? hDly : BADGE_CONFIG_DEFAULT.havocDelay;
 }
 
 void configSave() {
@@ -121,6 +127,8 @@ void configSave() {
   EEPROM.write(EEPROM_ADDR_IDLE_SCROLL,  g_cfg.idleScrollMs);
   EEPROM.write(EEPROM_ADDR_NAME_SCROLL,  g_cfg.nameScrollMs);
   EEPROM.write(EEPROM_ADDR_MATRIX_ANIM,  g_cfg.matrixAnim);
+  EEPROM.write(EEPROM_ADDR_HAVOC_CODES,  g_cfg.havocCodes);
+  EEPROM.write(EEPROM_ADDR_HAVOC_DELAY,  g_cfg.havocDelay);
   EEPROM.commit();
 }
 
@@ -138,6 +146,8 @@ void configSaveSettings() {
   EEPROM.write(EEPROM_ADDR_IDLE_SCROLL,  g_cfg.idleScrollMs);
   EEPROM.write(EEPROM_ADDR_NAME_SCROLL,  g_cfg.nameScrollMs);
   EEPROM.write(EEPROM_ADDR_MATRIX_ANIM,  g_cfg.matrixAnim);
+  EEPROM.write(EEPROM_ADDR_HAVOC_CODES,  g_cfg.havocCodes);
+  EEPROM.write(EEPROM_ADDR_HAVOC_DELAY,  g_cfg.havocDelay);
   EEPROM.commit();
 }
 
@@ -1100,6 +1110,137 @@ static void irRemoteStep() {
   irRemoteDrawIcon();
 }
 
+// ============================================================ IR havoc =======
+//
+// Cycles through a built-in table of power/source codes for common TV brands
+// and transmits them one by one, letting the RF spray across the room.
+//
+// The matrix shows a plasma animation in the background; each transmission
+// triggers a brief white flash on the matrix and a front-LED pulse.
+//
+// Controls (while active):
+//   B — exit back to the menu
+//
+// Configure via the serial CLI:
+//   havoc codes power|input|all   — which code types to send
+//   havoc delay <100-2000>        — ms between sends
+//
+// NOTE: codes are best-effort approximations of documented IR databases.
+// Many TV models use non-standard addresses or commands — YMMV.
+
+struct TvCode {
+  const char* brand;
+  uint8_t     proto;    // IR_PROTO_*
+  uint16_t    addr;
+  uint8_t     power;    // 0xFF = no code known for this type
+  uint8_t     input;    // 0xFF = no code known for this type
+};
+
+static const TvCode TV_CODES[] = {
+  //  Brand           Protocol           Addr    Power  Input/Source
+  { "SAMSUNG",    IR_PROTO_SAMSUNG, 0x0707, 0x02,  0x01 },
+  { "LG",         IR_PROTO_NEC,     0x0004, 0x08,  0x0B },
+  { "SONY",       IR_PROTO_SONY,    0x0001, 0x15,  0x25 },
+  { "PHILIPS",    IR_PROTO_RC5,     0x0000, 0x0C,  0xFF },
+  { "PANASONIC",  IR_PROTO_NEC,     0x4004, 0x3D,  0x3B },
+  { "TOSHIBA",    IR_PROTO_NEC,     0x0002, 0x12,  0x34 },
+  { "SHARP",      IR_PROTO_NEC,     0x00AA, 0x02,  0xA9 },
+  { "VIZIO",      IR_PROTO_NEC,     0x0F0F, 0x09,  0x0C },
+  { "HISENSE",    IR_PROTO_NEC,     0x0000, 0x46,  0x38 },
+  { "TCL",        IR_PROTO_NEC,     0x0000, 0x4D,  0x37 },
+  { "JVC",        IR_PROTO_NEC,     0x00C5, 0x29,  0x0E },
+  { "HITACHI",    IR_PROTO_NEC,     0x0001, 0x60,  0x62 },
+  { "GRUNDIG",    IR_PROTO_RC5,     0x0000, 0x0C,  0xFF },
+  { "FUNAI",      IR_PROTO_NEC,     0x0000, 0x28,  0x2E },
+  { "BEKO",       IR_PROTO_NEC,     0x01FE, 0x40,  0x6F },
+};
+static const int TV_CODE_COUNT = sizeof(TV_CODES) / sizeof(TV_CODES[0]);
+
+// Helper: build a temporary IrCode on the stack and transmit it.
+static void irHavocSend(uint8_t proto, uint16_t addr, uint8_t cmd) {
+  IrCode c;
+  c.protocol = proto;
+  c.addr_lo  = (uint8_t)(addr & 0xFF);
+  c.addr_hi  = (uint8_t)(addr >> 8);
+  c.command  = cmd;
+  irSendCode(c);
+}
+
+struct HavocCtx {
+  uint8_t       tvIdx;        // which TV brand we're currently targeting
+  uint8_t       codePhase;    // 0 = power, 1 = input
+  unsigned long lastSend;     // millis() of last transmission
+  uint8_t       flashFrames;  // frames remaining for post-send matrix flash
+  bool          exitRequested;
+};
+static HavocCtx havocCtx;
+
+// Advance tvIdx / codePhase to the next valid code, respecting havocCodes mask.
+static void havocAdvance() {
+  bool wantPower = (g_cfg.havocCodes & HAVOC_SEND_POWER) != 0;
+  bool wantInput = (g_cfg.havocCodes & HAVOC_SEND_INPUT) != 0;
+  for (int tries = 0; tries < TV_CODE_COUNT * 2 + 4; tries++) {
+    // Step forward
+    if (havocCtx.codePhase == 0) {
+      havocCtx.codePhase = 1;
+    } else {
+      havocCtx.codePhase = 0;
+      havocCtx.tvIdx = (havocCtx.tvIdx + 1) % TV_CODE_COUNT;
+    }
+    const TvCode& tv = TV_CODES[havocCtx.tvIdx];
+    if (havocCtx.codePhase == 0 && wantPower && tv.power != 0xFF) return;
+    if (havocCtx.codePhase == 1 && wantInput && tv.input != 0xFF) return;
+  }
+  // Fallback — nothing matched (e.g. havocCodes = 0): reset silently
+  havocCtx.tvIdx = 0; havocCtx.codePhase = 0;
+}
+
+static void havocReset() {
+  havocCtx.tvIdx        = 0;
+  havocCtx.codePhase    = 0;
+  havocCtx.lastSend     = 0;
+  havocCtx.flashFrames  = 0;
+  havocCtx.exitRequested = false;
+  matrixAnimReset();
+}
+
+static void havocStep() {
+  if (input.pressed[BI_B]) {
+    havocCtx.exitRequested = true;
+    analogWrite(IR_PIN, 0);
+    return;
+  }
+
+  unsigned long now     = millis();
+  unsigned long delayMs = (unsigned long)g_cfg.havocDelay * 100UL;
+
+  if (now - havocCtx.lastSend >= delayMs) {
+    havocCtx.lastSend = now;
+
+    const TvCode& tv = TV_CODES[havocCtx.tvIdx];
+    uint8_t cmd = (havocCtx.codePhase == 0) ? tv.power : tv.input;
+
+    if (cmd != 0xFF) {
+      for (int p : FRONT_LEDS) analogWrite(p, 1000);
+      irHavocSend(tv.proto, tv.addr, cmd);
+      for (int p : FRONT_LEDS) analogWrite(p, 0);
+      havocCtx.flashFrames = 4;
+    }
+    havocAdvance();
+  }
+
+  // Matrix: full-white flash on send, plasma otherwise
+  if (havocCtx.flashFrames > 0) {
+    havocCtx.flashFrames--;
+    for (int y = 0; y < H; y++)
+      for (int x = 0; x < W; x++)
+        fbSet(x, y, MATRIX_BRIGHTNESS);
+    fbPush();
+  } else {
+    matrixPlasmaStep();
+  }
+}
+
 // ============================================================ welcome msgs ==
 //
 // One of these is chosen at random each boot for the ST_WELCOME_SCROLL state.
@@ -1136,7 +1277,7 @@ static const char* pickWelcomeMsg() {
 // ============================================================ menu =========
 
 const char* MENU_ITEMS[] = {
-  "SNAKE", "SIMON", "WELCOME", "ANIMATIONS", "SETTINGS", "FLASHLIGHT", "IR REMOTE", "NAME BADGE"
+  "SNAKE", "SIMON", "WELCOME", "ANIMATIONS", "SETTINGS", "FLASHLIGHT", "IR REMOTE", "IR HAVOC", "NAME BADGE"
 };
 const int   MENU_LEN = sizeof(MENU_ITEMS) / sizeof(MENU_ITEMS[0]);
 static int  menuIdx  = 0;
@@ -1244,6 +1385,7 @@ enum AppState {
   ST_SETTINGS,
   ST_FLASHLIGHT,
   ST_IR_REMOTE,
+  ST_IR_HAVOC,
   ST_NAME_BADGE,
 };
 
@@ -1357,6 +1499,7 @@ static void enterState(AppState s) {
     case ST_SETTINGS:       settingsReset(); break;
     case ST_FLASHLIGHT:     flashReset(); break;
     case ST_IR_REMOTE:      irRemoteReset(); break;
+    case ST_IR_HAVOC:       havocReset(); break;
     case ST_NAME_BADGE:     nameBadgeReset(); break;
     default: break;
   }
@@ -1573,7 +1716,8 @@ void loop() {
           case 4: enterState(ST_SETTINGS);       break;
           case 5: enterState(ST_FLASHLIGHT);     break;
           case 6: enterState(ST_IR_REMOTE);      break;
-          case 7: enterState(ST_NAME_BADGE);     break;
+          case 7: enterState(ST_IR_HAVOC);       break;
+          case 8: enterState(ST_NAME_BADGE);     break;
         }
       }
       break;
@@ -1612,6 +1756,12 @@ void loop() {
     case ST_IR_REMOTE: {
       irRemoteStep();
       if (irExitRequested) enterState(ST_MENU);
+      break;
+    }
+
+    case ST_IR_HAVOC: {
+      havocStep();
+      if (havocCtx.exitRequested) enterState(ST_MENU);
       break;
     }
 
