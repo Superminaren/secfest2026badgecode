@@ -1535,8 +1535,7 @@ static void animationsStep() {
 // Matrix shows a top-down controller outline with live button highlights.
 // Hold B for 2 s to exit back to the main menu (HID stays present but idle).
 
-static bool gamepadExitRequested = false;
-static bool gamepadIntroDone     = false;
+static bool gamepadIntroDone = false;
 
 static void gamepadDrawIcon() {
   fbClear();
@@ -1575,8 +1574,7 @@ static void gamepadDrawIcon() {
 }
 
 static void gamepadReset() {
-  gamepadExitRequested = false;
-  gamepadIntroDone     = false;
+  gamepadIntroDone = false;
   Joystick.useManualSend(true);   // batch all axis/button updates into one report
   scrollStart("CTRL", 50, MATRIX_BRIGHTNESS);
 }
@@ -1610,11 +1608,6 @@ static void gamepadStep() {
     fbPush();
   } else {
     gamepadDrawIcon();
-  }
-
-  // Hold B >= 2 s to return to menu
-  if (input.down[BI_B] && (millis() - input.heldSince[BI_B]) > 2000) {
-    gamepadExitRequested = true;
   }
 }
 
@@ -1925,7 +1918,6 @@ void loop() {
 
     case ST_GAMEPAD: {
       gamepadStep();
-      if (gamepadExitRequested) enterState(ST_MENU);
       break;
     }
   }

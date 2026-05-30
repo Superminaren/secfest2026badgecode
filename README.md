@@ -12,11 +12,11 @@ Welcome to the official firmware repository for the **Security Fest 2026 confere
 | RAM | 264 KB SRAM |
 | Flash | 16 MB |
 | LED matrix | 9 × 9 IS31FL3731 charlieplexed driver (I²C) |
-| Front LEDs | 4 × RGB-capable front LEDs |
+| Front LEDs | 4 × GPIO-driven front LEDs |
 | Flashlight | High-power white/IR LED on GPIO 15 (PWM) |
 | IR | Software-modulated 38/40 kHz IR transmitter |
 | Buttons | 6 — A, B, Up, Down, Left, Right |
-| SAO port | GPIO 0 (PWM sin-wave) + GPIO 1 (constant 10 % PWM) |
+| SAO port | GPIO 0 (PWM sin-wave) + GPIO 1 (pulsing PWM) |
 | Unused GPIO port | Marked with GPIO pinouts |
 | USB | USB-CDC serial at 115200 baud, capable of MIDI, HID, and more. |
 
