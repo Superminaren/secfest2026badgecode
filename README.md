@@ -26,6 +26,11 @@ Welcome to the official firmware repository for the **Security Fest 2026 confere
 
 The `welcome_demo` folder contains the main badge firmware. See [`welcome_demo/README.md`](welcome_demo/README.md) for flashing instructions.
 
+## Games controller mode
+
+Hold A when connecting the badge to the PC or Hold A then quickly press RST, the badge will show up as a games controller! Press RST to go back to badge original mode!
+
+
 ### Boot sequence
 
 1. **LED sweep** — the four front LEDs fan out while a growing line crosses the matrix.
