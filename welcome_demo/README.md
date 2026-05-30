@@ -29,3 +29,5 @@ The name is saved to the badge's EEPROM on first boot, so you don't need to pass
 ## Changing your name later
 
 Connect the badge over USB and open a serial monitor at 115200 baud (e.g. `pio device monitor`). The badge runs a small terminal — type `help` to see available commands including how to update the name without reflashing.
+
+You can alternatively use Putty towards the COM port in Windows, or minicom: `minicom -D /dev/ttyUSB0` / screen `screen /dev/ttyUSB0` in Linux.
