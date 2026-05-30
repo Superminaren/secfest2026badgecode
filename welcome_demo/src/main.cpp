@@ -570,6 +570,43 @@ static void matrixPlasmaStep() {
   fbPush();
 }
 
+// SWIRL — a single spiral arm rotating outward from the centre
+static void matrixSwirlStep() {
+  float t  = (float)millis() / 500.0f;
+  float cx = (W - 1) * 0.5f;
+  float cy = (H - 1) * 0.5f;
+  for (int y = 0; y < H; y++) {
+    for (int x = 0; x < W; x++) {
+      float dx  = x - cx;
+      float dy  = y - cy;
+      float ang = atan2f(dy, dx);
+      float d   = sqrtf(dx * dx + dy * dy);
+      float v   = sinf(ang * 2.0f - d * 1.2f + t * 2.5f);
+      fbSet(x, y, (uint8_t)((v + 1.0f) * 0.5f * 255.0f));
+    }
+  }
+  fbPush();
+}
+
+// COUNTER-SWIRL — two spiral arms rotating in opposite directions
+static void matrixCounterSwirlStep() {
+  float t  = (float)millis() / 500.0f;
+  float cx = (W - 1) * 0.5f;
+  float cy = (H - 1) * 0.5f;
+  for (int y = 0; y < H; y++) {
+    for (int x = 0; x < W; x++) {
+      float dx  = x - cx;
+      float dy  = y - cy;
+      float ang = atan2f(dy, dx);
+      float d   = sqrtf(dx * dx + dy * dy);
+      float v1  = sinf(ang * 3.0f - d * 1.5f + t * 2.5f);
+      float v2  = sinf(ang * 3.0f + d * 1.5f - t * 2.0f);
+      fbSet(x, y, (uint8_t)(((v1 + v2) * 0.5f + 1.0f) * 0.5f * 255.0f));
+    }
+  }
+  fbPush();
+}
+
 // Dispatch to the correct animation based on g_cfg.matrixAnim.
 static void matrixAnimStep() {
   switch (g_cfg.matrixAnim) {
@@ -1171,6 +1208,7 @@ struct HavocCtx {
   uint8_t       codePhase;    // 0 = power, 1 = input
   unsigned long lastSend;     // millis() of last transmission
   uint8_t       flashFrames;  // frames remaining for post-send matrix flash
+  uint8_t       animIdx;      // cycles through swirl → counter-swirl → plasma
   bool          exitRequested;
 };
 static HavocCtx havocCtx;
@@ -1200,6 +1238,7 @@ static void havocReset() {
   havocCtx.codePhase    = 0;
   havocCtx.lastSend     = 0;
   havocCtx.flashFrames  = 0;
+  havocCtx.animIdx      = 0;
   havocCtx.exitRequested = false;
   matrixAnimReset();
 }
@@ -1225,19 +1264,25 @@ static void havocStep() {
       irHavocSend(tv.proto, tv.addr, cmd);
       for (int p : FRONT_LEDS) analogWrite(p, 0);
       havocCtx.flashFrames = 4;
+      // Step the background animation on each successful send
+      havocCtx.animIdx = (havocCtx.animIdx + 1) % 3;
     }
     havocAdvance();
   }
 
-  // Matrix: full-white flash on send, plasma otherwise
+  // Matrix: full-white flash on send, then cycle swirl → counter-swirl → plasma
   if (havocCtx.flashFrames > 0) {
     havocCtx.flashFrames--;
     for (int y = 0; y < H; y++)
       for (int x = 0; x < W; x++)
-        fbSet(x, y, MATRIX_BRIGHTNESS);
+        fbSet(x, y, 255);
     fbPush();
   } else {
-    matrixPlasmaStep();
+    switch (havocCtx.animIdx) {
+      case 0: matrixSwirlStep();        break;
+      case 1: matrixCounterSwirlStep(); break;
+      default: matrixPlasmaStep();      break;
+    }
   }
 }
 
@@ -1250,9 +1295,7 @@ static void havocStep() {
 // substituted at runtime.  They are skipped silently when no name is stored.
 // Add new personalised lines here by including "%s" anywhere in the string.
 static const char* const WELCOME_MSGS[] = {
-  "WELCOME, %s TO SF 2026!",
-  "PAPPA BETALAR!",
-  "POKEMON ÄR BÄST!"
+  "WELCOME, %s TO SF 2026!"
 };
 static const int WELCOME_MSG_COUNT = sizeof(WELCOME_MSGS) / sizeof(WELCOME_MSGS[0]);
 
@@ -1295,8 +1338,7 @@ static const char* const IDLE_MSGS[] = {
   "STAY PARANOID",
   "GLENN GLENN GLENN",
   "EJ I TRAFIK",
-  "FÖRSENINGAR PGA FÖRSENINGAR",
-  "IM EMIL THERE WILL SOON BE A POLICY"
+  "FÖRSENINGAR PGA FÖRSENINGAR"
 };
 static const int IDLE_MSG_COUNT = sizeof(IDLE_MSGS) / sizeof(IDLE_MSGS[0]);
 
