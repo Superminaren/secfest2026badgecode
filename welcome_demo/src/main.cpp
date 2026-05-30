@@ -14,11 +14,13 @@
 #include <Wire.h>
 #include <Adafruit_IS31FL3731.h>
 #include <EEPROM.h>
+#include <Joystick.h>
 #include "font4x7.h"
 #include "badge_config.h"
 #include "serial_games.h"
 
 static SerialGames serialGames;
+static bool g_gamepadMode = false;   // set before USB init; true = controller boot
 
 // ============================================================ pin map =======
 
@@ -1429,6 +1431,7 @@ enum AppState {
   ST_IR_REMOTE,
   ST_IR_HAVOC,
   ST_NAME_BADGE,
+  ST_GAMEPAD,
 };
 
 // ============================================================ name badge ====
@@ -1521,6 +1524,100 @@ static void animationsStep() {
   }
 }
 
+// ============================================================ gamepad mode ===
+//
+// Activated by holding A while connecting to USB / turning on.
+// Presents as a composite CDC + HID gamepad; Serial still works.
+//
+// Left stick:  UP/DOWN/LEFT/RIGHT axes  (−32767 … 32767)
+// Buttons:     A → bit 0,  B → bit 1
+//
+// Matrix shows a top-down controller outline with live button highlights.
+// Hold B for 2 s to exit back to the main menu (HID stays present but idle).
+
+static bool gamepadExitRequested = false;
+static bool gamepadIntroDone     = false;
+
+static void gamepadDrawIcon() {
+  fbClear();
+  const uint8_t OUTLINE = 40;
+  const uint8_t BTN_OFF = 70;
+  const uint8_t BTN_ON  = 220;
+
+  // Shoulder bumps (row 0)
+  fbSet(2, 0, OUTLINE); fbSet(3, 0, OUTLINE);
+  fbSet(5, 0, OUTLINE); fbSet(6, 0, OUTLINE);
+  // Top body edge (row 1)
+  for (int x = 1; x <= 7; x++) fbSet(x, 1, OUTLINE);
+  // Body walls (rows 2-4)
+  fbSet(0, 2, OUTLINE); fbSet(8, 2, OUTLINE);
+  fbSet(0, 3, OUTLINE); fbSet(8, 3, OUTLINE);
+  fbSet(0, 4, OUTLINE); fbSet(8, 4, OUTLINE);
+  // Lower body (row 5, centre gap for grip)
+  fbSet(1,5,OUTLINE); fbSet(2,5,OUTLINE); fbSet(3,5,OUTLINE);
+  fbSet(5,5,OUTLINE); fbSet(6,5,OUTLINE); fbSet(7,5,OUTLINE);
+  // Grip bumps (row 6)
+  fbSet(1,6,OUTLINE); fbSet(2,6,OUTLINE);
+  fbSet(6,6,OUTLINE); fbSet(7,6,OUTLINE);
+
+  // D-pad cross (left side, centre at col 2 row 3)
+  fbSet(2, 2, input.down[BI_UP]    ? BTN_ON : BTN_OFF);
+  fbSet(1, 3, input.down[BI_LEFT]  ? BTN_ON : BTN_OFF);
+  fbSet(2, 3, OUTLINE);                                    // cross centre
+  fbSet(3, 3, input.down[BI_RIGHT] ? BTN_ON : BTN_OFF);
+  fbSet(2, 4, input.down[BI_DOWN]  ? BTN_ON : BTN_OFF);
+
+  // Face buttons A / B (right side)
+  fbSet(6, 3, input.down[BI_A] ? BTN_ON : BTN_OFF);
+  fbSet(7, 3, input.down[BI_B] ? BTN_ON : BTN_OFF);
+
+  fbPush();
+}
+
+static void gamepadReset() {
+  gamepadExitRequested = false;
+  gamepadIntroDone     = false;
+  Joystick.useManualSend(true);   // batch all axis/button updates into one report
+  scrollStart("CTRL", 50, MATRIX_BRIGHTNESS);
+}
+
+static void gamepadStep() {
+  // Left stick axes (0-1023, centre = 511)
+  Joystick.X(input.down[BI_LEFT]  ?    0 : input.down[BI_RIGHT] ? 1023 : 511);
+  Joystick.Y(input.down[BI_UP]    ?    0 : input.down[BI_DOWN]  ? 1023 : 511);
+
+  // Hat/D-pad (also maps directions for games that read hat instead of axes)
+  bool u = input.down[BI_UP], d = input.down[BI_DOWN];
+  bool l = input.down[BI_LEFT],  r = input.down[BI_RIGHT];
+  if      (u && r) Joystick.hat(HID_Joystick::UP_RIGHT);
+  else if (u && l) Joystick.hat(HID_Joystick::UP_LEFT);
+  else if (d && r) Joystick.hat(HID_Joystick::DOWN_RIGHT);
+  else if (d && l) Joystick.hat(HID_Joystick::DOWN_LEFT);
+  else if (u)      Joystick.hat(HID_Joystick::UP);
+  else if (d)      Joystick.hat(HID_Joystick::DOWN);
+  else if (l)      Joystick.hat(HID_Joystick::LEFT);
+  else if (r)      Joystick.hat(HID_Joystick::RIGHT);
+  else             Joystick.hat(HID_Joystick::IDLE);
+
+  // Face buttons
+  Joystick.setButton(0, input.down[BI_A]);
+  Joystick.setButton(1, input.down[BI_B]);
+  Joystick.send_now();
+
+  // Scroll "CTRL" intro once, then show live controller icon
+  if (!gamepadIntroDone) {
+    if (scrollRenderTick()) gamepadIntroDone = true;
+    fbPush();
+  } else {
+    gamepadDrawIcon();
+  }
+
+  // Hold B >= 2 s to return to menu
+  if (input.down[BI_B] && (millis() - input.heldSince[BI_B]) > 2000) {
+    gamepadExitRequested = true;
+  }
+}
+
 // ============================================================ state mach. ==
 
 static AppState appState = ST_BOOT_SWEEP;
@@ -1543,6 +1640,7 @@ static void enterState(AppState s) {
     case ST_IR_REMOTE:      irRemoteReset(); break;
     case ST_IR_HAVOC:       havocReset(); break;
     case ST_NAME_BADGE:     nameBadgeReset(); break;
+    case ST_GAMEPAD:        gamepadReset(); break;
     default: break;
   }
 }
@@ -1660,11 +1758,23 @@ static void frontLedUpdate() {
 // ============================================================ setup ========
 
 void setup() {
+  // Detect gamepad boot mode: hold A while connecting / powering on.
+  // Must happen before Serial.begin() (which starts the USB stack) so the
+  // USB device class is decided before the host enumerates.
+  pinMode(BTN_A, INPUT_PULLUP);
+  delayMicroseconds(500);   // let the pull-up settle
+  g_gamepadMode = (digitalRead(BTN_A) == LOW);
+
   Serial.begin(115200);
   delay(800);
-  Serial.println("\n=== Secfest 2026 Welcome Demo ===");
+  if (g_gamepadMode) {
+    Serial.println("\n=== Secfest 2026 — CONTROLLER MODE ===");
+    Joystick.begin();
+  } else {
+    Serial.println("\n=== Secfest 2026 Welcome Demo ===");
+  }
 
-  // Buttons
+  // Buttons (BTN_A was already configured above; setting it again is harmless)
   for (int i = 0; i < BI_COUNT; i++) pinMode(BUTTON_PINS[i], INPUT_PULLUP);
 
   // Front LEDs
@@ -1697,7 +1807,7 @@ void setup() {
   // SAO GPIO PWM (must come after randomSeed / analogRead so ADC init is done)
   saoSetup();
 
-  enterState(ST_BOOT_SWEEP);
+  enterState(g_gamepadMode ? ST_GAMEPAD : ST_BOOT_SWEEP);
 }
 
 // ============================================================ loop =========
@@ -1810,6 +1920,12 @@ void loop() {
     case ST_NAME_BADGE: {
       nameBadgeStep();
       if (nameBadgeCtx.exitRequested) enterState(ST_MENU);
+      break;
+    }
+
+    case ST_GAMEPAD: {
+      gamepadStep();
+      if (gamepadExitRequested) enterState(ST_MENU);
       break;
     }
   }
