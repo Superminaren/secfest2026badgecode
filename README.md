@@ -1,4 +1,4 @@
-# Secfest 2026 Badge
+# Security Fest 2026 Badge
 
 Welcome to the official firmware repository for the **Security Fest 2026 conference badge**. The badge is a small, hackable piece of hardware you can take home, customise, and build on top of.
 
